@@ -1,0 +1,26 @@
+# Copy to docker-compose.yml (or use `docker compose -f docker-compose.example.yml up`).
+services:
+  mock-bedrock:
+    build: .
+    environment:
+      MOCK_BEDROCK_PACK: ${MOCK_BEDROCK_PACK:-generic}   # generic | /path/in/container/pack.py
+    # Extra CLI args pass through the entrypoint, e.g.:
+    # command: ["--scenarios", "/data/scenarios.json"]
+    # To change the port set MOCK_BEDROCK_PORT here (not --port): the healthcheck reads it.
+    ports:
+      - "127.0.0.1:52999:52999"        # host loopback only; never publish on 0.0.0.0
+    volumes:
+      - ./.mock-bedrock:/data          # requests.jsonl, modes.json
+    # healthcheck is inherited from the Dockerfile (GET /health)
+
+  # Example: another container calling the mock.
+  # your-app:
+  #   build: ./your-app
+  #   depends_on:
+  #     mock-bedrock:
+  #       condition: service_healthy
+  #   environment:
+  #     AWS_ENDPOINT_URL_BEDROCK_RUNTIME: http://mock-bedrock:52999
+  #     AWS_ACCESS_KEY_ID: dummy
+  #     AWS_SECRET_ACCESS_KEY: dummy
+  #     AWS_REGION: us-east-1

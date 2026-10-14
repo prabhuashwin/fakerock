@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+logs/
+.mock-bedrock/
+.claude/context-check.log
+# Local Claude Code setup and session notes (not part of the project)
+.claude/
+CLAUDE.md
+claude-setup/
+handoffs/

@@ -1,0 +1,9 @@
+tests
+.git
+.claude
+claude-setup
+handoffs
+logs
+**/__pycache__
+*.pyc
+.mock-bedrock
