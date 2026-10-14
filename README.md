@@ -1,5 +1,7 @@
 # fakerock: a local mock server for AWS Bedrock Runtime
 
+[![tests](https://github.com/prabhuashwin/fakerock/actions/workflows/tests.yml/badge.svg)](https://github.com/prabhuashwin/fakerock/actions/workflows/tests.yml)
+
 A local, stdlib-only Python stand-in for the **Amazon Bedrock Runtime** API (AWS Bedrock). Use it to
 run an app or its tests against Bedrock-shaped responses. It never contacts AWS, never uses real
 credentials, and costs nothing.
@@ -189,11 +191,18 @@ vectors after switching back to real Bedrock.
 Answer quality, real latency/rate limits, token limits (counts are `len(text)//4`),
 model-specific request validation, IAM/auth.
 
+Client coverage: contract-tested with boto3 only. The Java SDK v2 and JavaScript SDK v3 should
+work (same wire format and HTTP/1.1 chunked streams) but have not been tested yet.
+
 ## Tests
 
 ```
+pip install -r requirements-dev.txt   # boto3, for the contract tests
 python -m unittest discover -s tests
 ```
+
+Without boto3 the contract tests are skipped and the rest still run. CI runs the suite on
+Python 3.10 and 3.12 for every push and pull request.
 
 ## License
 

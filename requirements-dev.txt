@@ -1,0 +1,2 @@
+# Test-only dependencies. The server itself needs nothing beyond the standard library.
+boto3>=1.34
