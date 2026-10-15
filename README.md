@@ -18,7 +18,7 @@ Why use it:
   quota, outages, validation), stalls, added latency, dropped connections, and truncated or
   broken streams can be switched on without restarting, so you can test retry and
   error handling.
-- **Drop-in.** Real AWS SDKs (boto3 is tested) work unchanged; you only override the
+- **Drop-in.** Real AWS SDKs (boto3 and the JS SDK v3 are tested) work unchanged; you only override the
   endpoint URL. Python 3 standard library only, so it also ships as a tiny Docker image.
 - **Your own replies.** A small "pack" file decides what the mock answers for your app.
 
@@ -45,9 +45,10 @@ on a cell. Corrections welcome.
 
 | Path | Contents |
 |---|---|
-| `mock_bedrock/` | The server: routing and modes (`server.py`), InvokeModel (`invoke.py`), Converse (`converse.py`), AWS event-stream encoding (`eventstream.py`), embeddings (`embeddings.py`), live controls and request log (`control.py`), in-test server (`testing.py`), pytest fixture (`pytest_plugin.py`) |
+| `mock_bedrock/` | The server: routing and modes (`server.py`), InvokeModel (`invoke.py`), Converse (`converse.py`), AWS event-stream encoding (`eventstream.py`), embeddings (`embeddings.py`), opt-in strict validation (`strict.py`), live controls and request log (`control.py`), in-test server (`testing.py`), pytest fixture (`pytest_plugin.py`) |
 | `mock_bedrock/packs/` | Reply packs: the pack interface (`base.py`) and the default echo pack (`generic.py`) |
-| `tests/` | Unit, streaming, hardening and boto3 contract tests |
+| `tests/` | Unit, streaming, hardening, strict-mode and boto3 contract tests |
+| `examples/` | pytest + boto3 retry recipe, JS SDK v3 smoke test (`examples/js/`), copy-paste GitHub Actions workflow |
 | `Dockerfile`, `docker-compose.example.yml` | Container image and an example compose service (published on loopback only) |
 
 ## Supported APIs
@@ -98,8 +99,8 @@ docker run --rm -p 127.0.0.1:52999:52999 -v "$PWD/.mock-bedrock:/data" mock-bedr
 docker run ... mock-bedrock --scenarios /data/scenarios.json
 ```
 
-A prebuilt multi-arch image is published on version tags (available from the first release):
-`docker pull ghcr.io/prabhuashwin/fakerock`.
+A prebuilt multi-arch image is published on version tags:
+`docker pull ghcr.io/prabhuashwin/fakerock:0.4.0` (or `:latest`). Pin a version in CI.
 
 `docker-compose.example.yml` shows a loopback-only publish and a sibling container. The image binds `0.0.0.0` inside
 the container only; do not publish the port on a non-loopback host interface. The control routes
@@ -408,10 +409,11 @@ vectors after switching back to real Bedrock.
 ## Not covered
 
 Answer quality, real latency/rate limits, token limits (counts are `len(text)//4`),
-model-specific request validation, IAM/auth.
+model-specific request validation beyond `--strict` (Anthropic and Converse shapes only), IAM/auth.
 
-Client coverage: contract-tested with boto3 only. The Java SDK v2 and JavaScript SDK v3 should
-work (same wire format and HTTP/1.1 chunked streams) but have not been tested yet.
+Client coverage: contract-tested with boto3, and smoke-tested in CI with the JavaScript SDK v3
+(`examples/js/`, needs the HTTP/1.1 handler above). The Java SDK v2 should work (same wire format
+and HTTP/1.1 chunked streams) but has not been tested yet.
 
 ## Tests
 
@@ -420,8 +422,18 @@ pip install -e ".[test]"   # boto3 + pytest (requirements-dev.txt has the same)
 python -m unittest discover -s tests
 ```
 
-Without boto3 the contract tests are skipped and the rest still run. CI runs the suite on
-Python 3.10 and 3.12 for every push and pull request.
+Without boto3 the contract tests are skipped and the rest still run. CI runs on every push and pull
+request: the suite on Python 3.10 and 3.12, a wheel/sdist build and install check, the JS SDK v3 smoke
+test (normal and `--strict`), and a Docker image build.
+
+## Releases
+
+- **0.4.0:** mid-stream error modes and `_stream_error_after`; opt-in strict request validation
+  (`--strict`); JS SDK v3 smoke test in CI; sdist now includes the test helpers.
+- **0.3.0:** the full set of Bedrock error modes, `_latency_seconds`, `_chunk_delay_seconds`, and `drop`
+  (closed connection) injection.
+- **0.2.0:** first packaged release: `fakerock` command, `MockBedrock` test double, pytest fixture,
+  control API, `--deterministic`, GHCR image.
 
 ## License
 
