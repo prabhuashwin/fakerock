@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fakerock"
+dynamic = ["version"]
+description = "Local mock of AWS Bedrock Runtime (Converse, InvokeModel, streaming, embeddings) for tests and development"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+    "Framework :: Pytest",
+]
+
+[project.optional-dependencies]
+test = ["boto3>=1.34", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/prabhuashwin/fakerock"
+
+[project.scripts]
+fakerock = "mock_bedrock.server:main"
+mock-bedrock = "mock_bedrock.server:main"
+
+[project.entry-points.pytest11]
+"mock_bedrock.pytest_plugin" = "mock_bedrock.pytest_plugin"
+
+[tool.setuptools]
+packages = ["mock_bedrock", "mock_bedrock.packs"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mock_bedrock.__version__"}

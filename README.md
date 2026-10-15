@@ -41,8 +41,19 @@ Anything else returns 404 `UnknownOperationException`.
 
 ## Quick start
 
+Install (not on PyPI yet): `pip install git+https://github.com/prabhuashwin/fakerock`, or
+`pip install -e .` from a checkout. That gives you the `fakerock` command (alias `mock-bedrock`).
+From a checkout you can also run without installing, using `python -m mock_bedrock`.
+
 ```
-python -m mock_bedrock                       # http://127.0.0.1:52999
+fakerock                                     # http://127.0.0.1:52999
+fakerock --scenarios scenarios.json --port 8080   # same as python -m mock_bedrock ...
+```
+
+Without installing:
+
+```
+python -m mock_bedrock
 python -m mock_bedrock --scenarios scenarios.json --port 8080
 ```
 
@@ -117,8 +128,10 @@ Server errors raise `RuntimeError` with the server's message.
 list, or a path to a scenarios file. Bad values raise at start. Logs go to a temp dir
 (`mock.log_dir`) that is removed on stop unless you pass `log_dir`.
 
-pytest: add `pytest_plugins = ["mock_bedrock.pytest_plugin"]` to `conftest.py`, then take the
-`fakerock` fixture (a started `MockBedrock`, one per test, xdist-safe):
+pytest: once fakerock is installed the plugin registers itself, so just take the
+`fakerock` fixture. (Only when running from a source checkout without installing, add
+`pytest_plugins = ["mock_bedrock.pytest_plugin"]` to `conftest.py`; having that line as well as
+the install is harmless.) The fixture yields a started `MockBedrock`, one per test, xdist-safe:
 
 ```python
 def test_reply(fakerock):
@@ -301,7 +314,7 @@ work (same wire format and HTTP/1.1 chunked streams) but have not been tested ye
 ## Tests
 
 ```
-pip install -r requirements-dev.txt   # boto3, for the contract tests
+pip install -e ".[test]"   # boto3 + pytest (requirements-dev.txt has the same)
 python -m unittest discover -s tests
 ```
 

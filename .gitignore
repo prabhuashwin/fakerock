@@ -8,3 +8,7 @@ logs/
 CLAUDE.md
 claude-setup/
 handoffs/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
