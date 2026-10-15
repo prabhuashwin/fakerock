@@ -12,6 +12,8 @@ drop: non-streaming APIs close the connection with no response; streaming APIs s
 modes.json also accepts _stall_seconds, _latency_seconds (delay before every reply) and
 _chunk_delay_seconds (delay between streamed events), _stream_error_after (deltas sent before a stream
 error mode's exception; default 1).
+Strict mode (--strict, env MOCK_BEDROCK_STRICT, MockBedrock(strict=True)): converse and Anthropic-shaped invoke
+bodies are checked by mock_bedrock.strict and rejected with ValidationException (400) like Bedrock would.
 """
 import argparse
 import json
@@ -31,6 +33,7 @@ from mock_bedrock.embeddings import handle_embedding, is_embedding_model
 from mock_bedrock.converse import build_converse_response, converse_stream_events, parse_converse
 from mock_bedrock.invoke import build_invoke_response, invoke_stream_events, parse_invoke
 from mock_bedrock.packs.base import Call, Reply, load_pack
+from mock_bedrock.strict import check_converse, check_invoke, is_anthropic_invoke
 
 ROUTE_RE = re.compile(r"^/model/(.+)/(invoke|invoke-with-response-stream|converse|converse-stream)$")
 
@@ -180,6 +183,11 @@ def handle_invoke(app, h, model, body_bytes, path):
         return result
     try:
         body = _parse_json_object(body_bytes)
+        if app.strict and is_anthropic_invoke(model, body):
+            msg = check_invoke(model, body)
+            if msg:
+                return done(error_result(400, "ValidationException", msg),
+                            family=None, mode=None, status=400, prompt="")
         if is_embedding_model(model):
             resp, n = handle_embedding(model, body, app.embed_dims, app.ids.embed_id)
         else:
@@ -216,6 +224,13 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
             return result
         try:
             body = _parse_json_object(body_bytes)
+            if app.strict:
+                if api.startswith("invoke"):
+                    msg = check_invoke(model, body) if is_anthropic_invoke(model, body) else None
+                else:
+                    msg = check_converse(body)
+                if msg:
+                    return done(error_result(400, "ValidationException", msg))
             call = parse(model, body, streaming)
         except ValueError as e:
             return done(error_result(400, "ValidationException", f"Malformed input request: {e}"))
@@ -388,18 +403,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class App:
-    def __init__(self, pack, control, embed_dims, ids=None):
+    def __init__(self, pack, control, embed_dims, ids=None, strict=False):
         self.pack, self.control, self.embed_dims, self.ids = pack, control, embed_dims, ids or IdSource()
+        self.strict = strict
 
 
 def make_server(host="127.0.0.1", port=52999, pack="generic", pack_options=None, log_dir=None,
-                modes_file=None, scenarios_file=None, embed_dims=None, modes=None, scenarios=None, deterministic=False):
+                modes_file=None, scenarios_file=None, embed_dims=None, modes=None, scenarios=None, deterministic=False,
+                strict=False):
     log_dir = Path(log_dir or "./.mock-bedrock").resolve()
     control = Control(log_dir, modes_file, scenarios_file, modes=modes, scenarios=scenarios)
     pack_obj = load_pack(pack, pack_options or {}) if isinstance(pack, str) else pack
     ids = IdSource(deterministic)
     control._reset_hooks.append(ids.reset)
-    app = App(pack_obj, control, embed_dims, ids)
+    app = App(pack_obj, control, embed_dims, ids, strict)
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
@@ -424,6 +441,9 @@ def main(argv=None):
                     default=os.environ.get("MOCK_BEDROCK_DETERMINISTIC", "").strip().lower() in ("1", "true", "yes", "on"),
                     help="counter-based request/message ids instead of random "
                          "(env MOCK_BEDROCK_DETERMINISTIC)")
+    ap.add_argument("--strict", action="store_true",
+                    default=os.environ.get("MOCK_BEDROCK_STRICT", "").strip().lower() in ("1", "true", "yes", "on"),
+                    help="reject requests real Bedrock would reject (env MOCK_BEDROCK_STRICT)")
     ap.add_argument("--version", action="version", version=f"mock_bedrock {__version__}")
     a = ap.parse_args(argv)
     opts = {}
@@ -432,7 +452,7 @@ def main(argv=None):
         opts[k] = v
     try:
         server = make_server(a.host, a.port, a.pack, opts, a.log_dir, a.modes, a.scenarios, a.embed_dims,
-                             deterministic=a.deterministic)
+                             deterministic=a.deterministic, strict=a.strict)
     except (ScenarioError, RuntimeError) as e:
         raise SystemExit(f"mock_bedrock: {e}")
     host, port = server.server_address[:2]

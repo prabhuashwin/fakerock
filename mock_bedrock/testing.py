@@ -72,12 +72,12 @@ class FakerockClient:
 class MockBedrock:
     def __init__(self, *, port=0, host="127.0.0.1", pack="generic", pack_options=None, modes=None,
                  scenarios=None, log_dir=None, embed_dims=None,
-                 deterministic=False):
+                 deterministic=False, strict=False):
         if isinstance(scenarios, (str, Path)):
             scenarios = load_scenarios(scenarios)
         self._kw = dict(host=host, port=port, pack=pack, pack_options=pack_options, modes=modes,
                         scenarios=scenarios, embed_dims=embed_dims,
-                        deterministic=deterministic)
+                        deterministic=deterministic, strict=strict)
         self._own_dir = log_dir is None
         self._log_dir = Path(log_dir) if log_dir else None
         self._server = self._thread = None

@@ -81,7 +81,8 @@ Flags (env var supplying the default in brackets): `--host` [`MOCK_BEDROCK_HOST`
 `--port` [`MOCK_BEDROCK_PORT`, 52999], `--pack` [`MOCK_BEDROCK_PACK`, generic],
 `--pack-opt KEY=VALUE` (repeatable), `--log-dir` [`MOCK_BEDROCK_LOG_DIR`, `./.mock-bedrock`],
 `--modes` (default `<log-dir>/modes.json`), `--scenarios`, `--embed-dims` [`MOCK_BEDROCK_EMBED_DIMS`,
-per-model default], `--deterministic` [`MOCK_BEDROCK_DETERMINISTIC`=1/true], `--version`.
+per-model default], `--deterministic` [`MOCK_BEDROCK_DETERMINISTIC`=1/true], `--strict` [`MOCK_BEDROCK_STRICT`=1/true/yes/on],
+`--version`.
 
 Deterministic ids (also `MockBedrock(deterministic=True)`): instead of random uuids, ids come from per-server
 counters, so the same request sequence gives identical output. Request ids (`x-amzn-RequestId` and the log's
@@ -302,6 +303,35 @@ with MockBedrock(scenarios=[{"id": "f", "times": 2, "reply": {"mode": "throttle"
 
 Streaming responses use HTTP/1.1 chunked encoding (one chunk per event); others carry
 `content-length`; connections are keep-alive.
+
+## Strict validation
+
+Opt-in, off by default. Catches requests real Bedrock would reject, before they reach real Bedrock.
+Enable with `--strict`, `MOCK_BEDROCK_STRICT=1`, or `MockBedrock(strict=True)` (`make_server(..., strict=True)`).
+
+A violation returns 400 `ValidationException` before any stream starts, and is logged with status 400.
+The first violation found wins. Checked:
+
+- Converse / ConverseStream, messages: must be a non-empty list that starts with `user`; roles
+  `user`/`assistant` only and alternating; non-empty `content`; no blank text blocks; every `toolResult` matches
+  a `toolUse` in the previous turn and every `toolUse` gets a `toolResult`. A final assistant message
+  (prefill) is accepted. E.g. `A conversation must start with a user message. Try again with a
+  conversation that starts with a user message.`
+- Converse, config: `maxTokens` integer >= 1; `temperature` / `topP` numbers in [0, 1]; `stopSequences` a
+  list of strings; `toolUse`/`toolResult` blocks need `toolConfig`; tools non-empty, names
+  match `[a-zA-Z0-9_-]{1,64}` and are unique, `inputSchema.json` an object. E.g. `The value at
+  inferenceConfig.temperature must be between 0 and 1.`
+- InvokeModel / InvokeModelWithResponseStream with an Anthropic `messages` body, schema: `anthropic_version`
+  (must be `bedrock-2023-05-31`), `max_tokens` and `messages` required; no unknown keys; `max_tokens` >= 1;
+  `temperature` / `top_p` in [0, 1]; `top_k` >= 0. E.g. `Malformed input request: #: required key
+  [max_tokens] not found, please reformat your input and try again.`
+- Same bodies, messages: same structure rules as Converse (first role `user`, alternation, non-empty
+  content, `tool_use` / `tool_result` pairing), worded as Anthropic's API words them. E.g. `messages: roles
+  must alternate between "user" and "assistant", but found multiple "user" roles in a row`.
+
+Not checked: embeddings, model ids, invoke bodies for non-Anthropic families (or without `messages` /
+`anthropic_version`). Wording is modelled on Bedrock's but not verified against the live service, so
+match on the exception type, not the message text.
 
 ## Logs
 
