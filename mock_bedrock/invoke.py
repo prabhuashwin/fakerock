@@ -54,7 +54,11 @@ def parse_invoke(model: str, body: dict, stream: bool = False) -> Call:
                 max_tokens=max_tokens, stream=stream, raw=body)
 
 
-def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False) -> list:
+def _msg_id(msg_id):
+    return msg_id or "msg_mock_" + uuid.uuid4().hex[:16]
+
+
+def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False, msg_id=None) -> list:
     """Encoded InvokeModelWithResponseStream events (Anthropic stream events in chunk.bytes)."""
     def chunk(obj):
         raw = base64.b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
@@ -62,7 +66,7 @@ def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False) -
 
     in_tok, out_tok = max(1, len(call.prompt) // 4), reply.tokens(call.max_tokens)
     ev = [chunk({"type": "message_start", "message": {
-        "id": "msg_mock_" + uuid.uuid4().hex[:16], "type": "message", "role": "assistant",
+        "id": _msg_id(msg_id), "type": "message", "role": "assistant",
         "model": call.model, "content": [], "stop_reason": None, "stop_sequence": None,
         "usage": {"input_tokens": in_tok, "output_tokens": 1}}})]
     if reply.tool_use:
@@ -89,13 +93,13 @@ def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False) -
     return ev
 
 
-def build_invoke_response(call: Call, reply: Reply) -> dict:
+def build_invoke_response(call: Call, reply: Reply, msg_id=None) -> dict:
     if reply.tool_use:
         tu = reply.tool_use
         content = [{"type": "tool_use", "id": tu["id"], "name": tu["name"], "input": tu.get("input", {})}]
     else:
         content = [{"type": "text", "text": reply.text}]
-    return {"id": "msg_mock_" + uuid.uuid4().hex[:16], "type": "message", "role": "assistant",
+    return {"id": _msg_id(msg_id), "type": "message", "role": "assistant",
             "model": call.model, "content": content, "stop_reason": reply.stop_reason,
             "stop_sequence": None,
             "usage": {"input_tokens": max(1, len(call.prompt) // 4),

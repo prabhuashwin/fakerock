@@ -31,7 +31,7 @@ def default_dims(model: str) -> int:
     return 1536 if m.startswith("amazon.titan-embed-text-v1") else 1024
 
 
-def handle_embedding(model: str, req: dict, dims_override=None):
+def handle_embedding(model: str, req: dict, dims_override=None, embed_id=None):
     """Return (response dict, item count). Raises ValueError on a malformed request.
 
     dims_override (--embed-dims) replaces the per-model default; Titan v2 still honours
@@ -45,7 +45,7 @@ def handle_embedding(model: str, req: dict, dims_override=None):
         texts = req.get("texts")
         if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
             raise ValueError("texts must be a list of strings")
-        return ({"id": str(uuid.uuid4()), "texts": texts,
+        return ({"id": (embed_id() if callable(embed_id) else embed_id) or str(uuid.uuid4()), "texts": texts,
                  "embeddings": [embed(t, dims) for t in texts],
                  "response_type": "embeddings_floats"}, len(texts))
     text = req.get("inputText")

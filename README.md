@@ -50,7 +50,13 @@ Flags (env var supplying the default in brackets): `--host` [`MOCK_BEDROCK_HOST`
 `--port` [`MOCK_BEDROCK_PORT`, 52999], `--pack` [`MOCK_BEDROCK_PACK`, generic],
 `--pack-opt KEY=VALUE` (repeatable), `--log-dir` [`MOCK_BEDROCK_LOG_DIR`, `./.mock-bedrock`],
 `--modes` (default `<log-dir>/modes.json`), `--scenarios`, `--embed-dims` [`MOCK_BEDROCK_EMBED_DIMS`,
-per-model default].
+per-model default], `--deterministic` [`MOCK_BEDROCK_DETERMINISTIC`=1/true], `--version`.
+
+Deterministic ids (also `MockBedrock(deterministic=True)`): instead of random uuids, ids come from per-server
+counters, so the same request sequence gives identical output. Request ids (`x-amzn-RequestId` and the log's
+`request_id`) are `00000000-0000-4000-8000-000000000001`, `...0002`, ...; Anthropic message ids are
+`msg_mock_0000000000000001`, ...; Cohere embed `id` uses its own counter in the request-id format.
+`POST /_fakerock/reset` restarts all counters. Log `at` timestamps stay wall-clock.
 
 Docker:
 

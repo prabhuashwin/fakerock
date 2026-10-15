@@ -10,12 +10,13 @@ import os
 import re
 import time
 import traceback
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
+from mock_bedrock import __version__
 from mock_bedrock.control import Control, ScenarioError
+from mock_bedrock.ids import IdSource
 from mock_bedrock.embeddings import handle_embedding, is_embedding_model
 from mock_bedrock.converse import build_converse_response, converse_stream_events, parse_converse
 from mock_bedrock.invoke import build_invoke_response, invoke_stream_events, parse_invoke
@@ -149,7 +150,7 @@ def _row(api, path, model, rid, stream, cap, **fields):
 
 
 def handle_invoke(app, h, model, body_bytes, path):
-    rid, cap = str(uuid.uuid4()), _capture(body_bytes)
+    rid, cap = app.ids.request_id(), _capture(body_bytes)
 
     def done(result, **fields):
         result.request_id = rid
@@ -158,7 +159,7 @@ def handle_invoke(app, h, model, body_bytes, path):
     try:
         body = _parse_json_object(body_bytes)
         if is_embedding_model(model):
-            resp, n = handle_embedding(model, body, app.embed_dims)
+            resp, n = handle_embedding(model, body, app.embed_dims, app.ids.embed_id)
         else:
             call = parse_invoke(model, body)
     except ValueError as e:
@@ -172,7 +173,7 @@ def handle_invoke(app, h, model, body_bytes, path):
                     scenario=sid if label == "scenario" else None)
     family = app.pack.family(call)
     mode, reply, _, sid = resolve(app, call, family, False)
-    result = reply_to_result(reply, lambda: build_invoke_response(call, reply))
+    result = reply_to_result(reply, lambda: build_invoke_response(call, reply, app.ids.msg_id()))
     return done(result, family=family, mode=mode, status=result.status, prompt=call.prompt,
                 scenario=sid if mode == "scenario" else None)
 
@@ -182,7 +183,8 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
     streaming = stream_events is not None
 
     def handler(app, h, model, body_bytes, path):
-        rid, cap = str(uuid.uuid4()), _capture(body_bytes)
+        rid, cap = app.ids.request_id(), _capture(body_bytes)
+        kw = (lambda: {"msg_id": app.ids.msg_id()}) if api.startswith("invoke") else dict
 
         def done(result, family=None, mode=None, prompt="", scenario=None):
             result.request_id = rid
@@ -198,10 +200,10 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
         mode, reply, stream_error, sid = resolve(app, call, family, streaming)
         failed = reply.raw_body is not None or reply.status >= 400 or reply.error_type
         if not streaming or failed:
-            result = reply_to_result(reply, lambda: build_response(call, reply))
+            result = reply_to_result(reply, lambda: build_response(call, reply, **kw()))
         else:
             result = HttpResult(200, b"")
-            result.events = stream_events(call, reply, stream_error)
+            result.events = stream_events(call, reply, stream_error, **kw())
         return done(result, family, mode, call.prompt, sid if mode == "scenario" else None)
     return handler
 
@@ -235,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
             # Streaming: one HTTP chunk per event-stream message, then the terminating chunk.
             self.send_response(200)
             self.send_header("content-type", "application/vnd.amazon.eventstream")
-            self.send_header("x-amzn-RequestId", result.request_id or str(uuid.uuid4()))
+            self.send_header("x-amzn-RequestId", result.request_id or self.app.ids.anon_id())
             self.send_header("transfer-encoding", "chunked")
             self.end_headers()
             self.wfile.flush()
@@ -247,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(result.status)
         self.send_header("content-type", "application/json")
-        self.send_header("x-amzn-RequestId", result.request_id or str(uuid.uuid4()))
+        self.send_header("x-amzn-RequestId", result.request_id or self.app.ids.anon_id())
         if result.error_type:
             self.send_header("x-amzn-ErrorType", result.error_type)
         self.send_header("content-length", str(len(result.body)))
@@ -345,16 +347,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class App:
-    def __init__(self, pack, control, embed_dims):
-        self.pack, self.control, self.embed_dims = pack, control, embed_dims
+    def __init__(self, pack, control, embed_dims, ids=None):
+        self.pack, self.control, self.embed_dims, self.ids = pack, control, embed_dims, ids or IdSource()
 
 
 def make_server(host="127.0.0.1", port=52999, pack="generic", pack_options=None, log_dir=None,
-                modes_file=None, scenarios_file=None, embed_dims=None, modes=None, scenarios=None):
+                modes_file=None, scenarios_file=None, embed_dims=None, modes=None, scenarios=None, deterministic=False):
     log_dir = Path(log_dir or "./.mock-bedrock").resolve()
     control = Control(log_dir, modes_file, scenarios_file, modes=modes, scenarios=scenarios)
     pack_obj = load_pack(pack, pack_options or {}) if isinstance(pack, str) else pack
-    app = App(pack_obj, control, embed_dims)
+    ids = IdSource(deterministic)
+    control._reset_hooks.append(ids.reset)
+    app = App(pack_obj, control, embed_dims, ids)
     handler = type("BoundHandler", (Handler,), {"app": app})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
@@ -375,13 +379,19 @@ def main(argv=None):
     ap.add_argument("--embed-dims", type=int, default=int(os.environ.get("MOCK_BEDROCK_EMBED_DIMS", "0")) or None,
                     help="override embedding dimensions for all models "
                          "(default per model; env MOCK_BEDROCK_EMBED_DIMS)")
+    ap.add_argument("--deterministic", action="store_true",
+                    default=os.environ.get("MOCK_BEDROCK_DETERMINISTIC", "").strip().lower() in ("1", "true", "yes", "on"),
+                    help="counter-based request/message ids instead of random "
+                         "(env MOCK_BEDROCK_DETERMINISTIC)")
+    ap.add_argument("--version", action="version", version=f"mock_bedrock {__version__}")
     a = ap.parse_args(argv)
     opts = {}
     for kv in a.pack_opt:
         k, _, v = kv.partition("=")
         opts[k] = v
     try:
-        server = make_server(a.host, a.port, a.pack, opts, a.log_dir, a.modes, a.scenarios, a.embed_dims)
+        server = make_server(a.host, a.port, a.pack, opts, a.log_dir, a.modes, a.scenarios, a.embed_dims,
+                             deterministic=a.deterministic)
     except (ScenarioError, RuntimeError) as e:
         raise SystemExit(f"mock_bedrock: {e}")
     host, port = server.server_address[:2]
