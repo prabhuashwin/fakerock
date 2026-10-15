@@ -42,7 +42,16 @@ ERROR_MODES = {
     "quota_exceeded": (400, "ServiceQuotaExceededException", "Service quota exceeded (mock)"),
     "model_error": (424, "ModelErrorException", "Model error (mock)"),
 }
-COMMON_MODES = ("answer", "stall", "truncate", *ERROR_MODES, "stream_error", "drop")
+# streaming mode -> (event-stream exception type, ERROR_MODES key used by non-streaming APIs)
+STREAM_ERROR_MODES = {
+    "stream_error": ("modelStreamErrorException", "error"),
+    "stream_throttle": ("throttlingException", "throttle"),
+    "stream_unavailable": ("serviceUnavailableException", "unavailable"),
+    "stream_internal": ("internalServerException", "error"),
+    "stream_validation": ("validationException", "validation"),
+    "stream_model_timeout": ("modelTimeoutException", "model_timeout"),
+}
+COMMON_MODES = ("answer", "stall", "truncate", *ERROR_MODES, *STREAM_ERROR_MODES, "drop")
 
 
 def _validate_reply(r, label):
@@ -231,6 +240,10 @@ class Control:
                         or not (val >= 0 and math.isfinite(val))):
                     raise ValueError(f"{fam} must be a finite number >= 0")
                 continue
+            if fam == "_stream_error_after":
+                if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                    raise ValueError(f"{fam} must be an integer >= 0")
+                continue
             if not isinstance(val, dict):
                 raise ValueError(f"family {fam!r} must be an object")
             for needle, mode in val.items():
@@ -253,6 +266,9 @@ class Control:
 
     def chunk_delay_seconds(self) -> float:
         return float(self._modes().get("_chunk_delay_seconds", 0))
+
+    def stream_error_after(self) -> int:
+        return int(self._modes().get("_stream_error_after", 1))
 
     def select_scenario(self, call: Call):
         """First matching scenario with 'times' left; counts the match atomically.

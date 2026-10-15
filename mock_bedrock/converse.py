@@ -82,8 +82,9 @@ def build_converse_response(call: Call, reply: Reply) -> dict:
             "metrics": {"latencyMs": 5}}
 
 
-def converse_stream_events(call: Call, reply: Reply, stream_error: bool = False) -> list:
-    """Encoded events. With stream_error: messageStart, first delta, then an exception event."""
+def converse_stream_events(call: Call, reply: Reply, stream_error=None, *, error_after: int = 1) -> list:
+    """Encoded events. stream_error: None/False, True (modelStreamErrorException) or an exception type;
+    when set, messageStart, error_after deltas, then that exception event."""
     ev = [eventstream.event("messageStart", {"role": "assistant"})]
     if reply.tool_use:
         tu = reply.tool_use
@@ -93,8 +94,10 @@ def converse_stream_events(call: Call, reply: Reply, stream_error: bool = False)
     else:
         deltas = [{"text": c} for c in split_chunks(reply.text)]
     if stream_error:
-        ev.append(eventstream.event("contentBlockDelta", {"contentBlockIndex": 0, "delta": deltas[0]}))
-        ev.append(eventstream.exception("modelStreamErrorException", "Mock stream error"))
+        for d in deltas[:error_after]:
+            ev.append(eventstream.event("contentBlockDelta", {"contentBlockIndex": 0, "delta": d}))
+        ev.append(eventstream.exception(
+            "modelStreamErrorException" if stream_error is True else stream_error, "Mock stream error"))
         return ev
     for d in deltas:
         ev.append(eventstream.event("contentBlockDelta", {"contentBlockIndex": 0, "delta": d}))

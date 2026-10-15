@@ -58,8 +58,10 @@ def _msg_id(msg_id):
     return msg_id or "msg_mock_" + uuid.uuid4().hex[:16]
 
 
-def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False, msg_id=None) -> list:
-    """Encoded InvokeModelWithResponseStream events (Anthropic stream events in chunk.bytes)."""
+def invoke_stream_events(call: Call, reply: Reply, stream_error=None, msg_id=None, *, error_after: int = 1) -> list:
+    """Encoded InvokeModelWithResponseStream events (Anthropic stream events in chunk.bytes).
+    stream_error: None/False, True (modelStreamErrorException) or an exception type; when set, error_after
+    deltas are sent, then that exception event."""
     def chunk(obj):
         raw = base64.b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
         return eventstream.event("chunk", {"bytes": raw})
@@ -79,8 +81,10 @@ def invoke_stream_events(call: Call, reply: Reply, stream_error: bool = False, m
                          "content_block": {"type": "text", "text": ""}}))
         deltas = [{"type": "text_delta", "text": c} for c in split_chunks(reply.text)]
     if stream_error:
-        ev.append(chunk({"type": "content_block_delta", "index": 0, "delta": deltas[0]}))
-        ev.append(eventstream.exception("modelStreamErrorException", "Mock stream error"))
+        for d in deltas[:error_after]:
+            ev.append(chunk({"type": "content_block_delta", "index": 0, "delta": d}))
+        ev.append(eventstream.exception(
+            "modelStreamErrorException" if stream_error is True else stream_error, "Mock stream error"))
         return ev
     for d in deltas:
         ev.append(chunk({"type": "content_block_delta", "index": 0, "delta": d}))

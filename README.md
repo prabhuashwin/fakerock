@@ -204,8 +204,16 @@ Common modes (every pack):
 - `not_found`: 404 ResourceNotFoundException
 - `quota_exceeded`: 400 ServiceQuotaExceededException
 - `model_error`: 424 ModelErrorException
-- `stream_error`: streaming APIs send one delta, then a `modelStreamErrorException`;
-  non-streaming APIs behave like `error`
+- Streamed errors: streaming APIs send the start events, some deltas, then an exception event
+  (boto3 raises `botocore.exceptions.EventStreamError` while iterating, error code = exception
+  name). Non-streaming APIs and embeddings return the fallback HTTP error.
+  - `stream_error`: `modelStreamErrorException` (fallback: like `error`)
+  - `stream_throttle`: `throttlingException` (like `throttle`)
+  - `stream_unavailable`: `serviceUnavailableException` (like `unavailable`)
+  - `stream_internal`: `internalServerException` (like `error`)
+  - `stream_validation`: `validationException` (like `validation`)
+  - `stream_model_timeout`: `modelTimeoutException` on InvokeModelWithResponseStream (like
+    `model_timeout`); ConverseStream has no such exception, so it sends `internalServerException`
 - `drop`: non-streaming calls get the connection closed with no response; streaming calls get
   headers and one event, then the connection closes without the terminating chunk. The request
   log records status 0. Useful for testing client connection-error handling. SDKs retry
@@ -220,9 +228,12 @@ stream starts.
 Two more top-level keys in `modes.json` (non-negative numbers, alongside `_stall_seconds`):
 `_latency_seconds` (default 0) adds a delay before every model reply in any mode, and
 `_chunk_delay_seconds` (default 0) adds a delay between streamed events.
+`_stream_error_after` (integer >= 0, default 1) is the number of deltas sent before a `stream_*`
+exception, capped at the reply's chunk count; 0 errors right after the start events. Use it to
+test what a client does with partial output.
 
-For embeddings, error modes return the mapped error, `stream_error` returns 500
-InternalServerException, `drop` closes the connection, `stall` sleeps then answers, and
+For embeddings, error modes return the mapped error, `stream_*` modes return their fallback error
+(`stream_error`: 500 InternalServerException), `drop` closes the connection, `stall` sleeps then answers, and
 `truncate` / other modes return a normal embedding.
 
 **Scenarios** (`--scenarios file.json`) take precedence over modes. The first entry whose
@@ -251,7 +262,7 @@ Sequences: a scenario can also have
   with later scenarios, then modes.
 - `replies` (non-empty list, instead of `reply`, not both): used in order on successive matches;
   the last one repeats.
-- reply `mode`: one of the common modes above (`answer`, `throttle`, `stream_error`, ...). The reply
+- reply `mode`: one of the common modes above (`answer`, `throttle`, `stream_error`, ...; `stream_*` work here too). The reply
   comes from the normal mode machinery (`stall` uses `_stall_seconds`); other keys in that reply
   object are ignored.
 

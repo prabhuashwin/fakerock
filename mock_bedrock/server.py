@@ -1,13 +1,17 @@
 """HTTP server: routes, common modes, error shaping, request logging.
 
 Supported APIs: InvokeModel, InvokeModelWithResponseStream, Converse, ConverseStream.
-Common modes: answer, stall, truncate, stream_error, drop, plus the error modes in control.ERROR_MODES:
+Common modes: answer, stall, truncate, stream error modes (below), drop, plus the error modes in control.ERROR_MODES:
 throttle, unavailable, error, validation, model_timeout, model_not_ready, access_denied, not_found,
 quota_exceeded, model_error.
-(stream_error: streaming APIs emit a first delta then a modelStreamErrorException; others act like error.
+Stream error modes (control.STREAM_ERROR_MODES): stream_error, stream_throttle, stream_unavailable,
+stream_internal, stream_validation, stream_model_timeout. Streaming APIs emit deltas then an event-stream
+exception (modelStreamErrorException, throttlingException, ...); other APIs act like the matching error mode
+(stream_error -> error).
 drop: non-streaming APIs close the connection with no response; streaming APIs send the first event, then close.)
 modes.json also accepts _stall_seconds, _latency_seconds (delay before every reply) and
-_chunk_delay_seconds (delay between streamed events).
+_chunk_delay_seconds (delay between streamed events), _stream_error_after (deltas sent before a stream
+error mode's exception; default 1).
 """
 import argparse
 import json
@@ -21,7 +25,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from mock_bedrock import __version__
-from mock_bedrock.control import ERROR_MODES, Control, ScenarioError
+from mock_bedrock.control import ERROR_MODES, STREAM_ERROR_MODES, Control, ScenarioError
 from mock_bedrock.ids import IdSource
 from mock_bedrock.embeddings import handle_embedding, is_embedding_model
 from mock_bedrock.converse import build_converse_response, converse_stream_events, parse_converse
@@ -54,17 +58,20 @@ def reply_to_result(reply: Reply, ok_builder):
     return result
 
 
+def _error_mode(mode):
+    return STREAM_ERROR_MODES[mode][1] if mode in STREAM_ERROR_MODES else mode
+
+
 def compute_reply(app, call, family, mode):
     """Apply the common modes; everything else goes to the pack. Returns a Reply."""
     if mode == "drop":
         r = app.pack.reply(call, family, "answer", app.control.ctx)
         r.drop = True
         return r
+    mode = _error_mode(mode)  # stream modes only stream on streaming APIs; elsewhere they act like their error mode
     if mode in ERROR_MODES:
         status, et, msg = ERROR_MODES[mode]
         return Reply(status=status, error_type=et, message=msg)
-    if mode == "stream_error":  # only meaningful for streaming APIs; elsewhere it behaves like "error"
-        return Reply(status=500, error_type="InternalServerException", message="Internal server error (mock)")
     if mode in ("stall", "truncate"):
         if mode == "stall":
             time.sleep(app.control.stall_seconds())
@@ -84,7 +91,7 @@ def _latency(app):
 
 def resolve(app, call, family, streaming):
     """One decision point for all chat-like APIs.
-    Returns (mode_label, reply, stream_error, scenario_id)."""
+    Returns (mode_label, reply, stream_exception_type_or_None, scenario_id)."""
     _latency(app)
     sel = app.control.select_scenario(call)
     if sel is not None:
@@ -97,9 +104,11 @@ def resolve(app, call, family, streaming):
         sid = None
         mode = app.control.mode_for(app.pack, call, family)
         label = mode
-    stream_error = False
-    if mode == "stream_error" and streaming:
-        stream_error, mode = True, "answer"
+    stream_error = None
+    if mode in STREAM_ERROR_MODES and streaming:
+        stream_error, mode = STREAM_ERROR_MODES[mode][0], "answer"
+        if call.api == "converse" and stream_error == "modelTimeoutException":
+            stream_error = "internalServerException"  # not in ConverseStreamOutput
     return label, compute_reply(app, call, family, mode), stream_error, sid
 
 
@@ -131,12 +140,10 @@ def resolve_embedding(app, call):
         label = mode
     if mode == "drop":
         return label, Reply(drop=True), sid
+    mode = _error_mode(mode)
     if mode in ERROR_MODES:
         status, et, msg = ERROR_MODES[mode]
         return label, Reply(status=status, error_type=et, message=msg), sid
-    if mode == "stream_error":
-        return label, Reply(status=500, error_type="InternalServerException",
-                            message="Internal server error (mock)"), sid
     if mode == "stall":
         time.sleep(app.control.stall_seconds())
     return label, None, sid
@@ -219,7 +226,7 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
             result = reply_to_result(reply, lambda: build_response(call, reply, **kw()))
         else:
             result = HttpResult(200, b"")
-            result.events = stream_events(call, reply, stream_error, **kw())
+            result.events = stream_events(call, reply, stream_error, error_after=app.control.stream_error_after(), **kw())
             result.drop = reply.drop
         return done(result, family, mode, call.prompt, sid if mode == "scenario" else None)
     return handler
