@@ -77,6 +77,9 @@ docker run --rm -p 127.0.0.1:52999:52999 -v "$PWD/.mock-bedrock:/data" mock-bedr
 docker run ... mock-bedrock --scenarios /data/scenarios.json
 ```
 
+A prebuilt multi-arch image is published on version tags (available from the first release):
+`docker pull ghcr.io/prabhuashwin/fakerock`.
+
 `docker-compose.example.yml` shows a loopback-only publish and a sibling container. The image binds `0.0.0.0` inside
 the container only; do not publish the port on a non-loopback host interface. The control routes
 (`/_fakerock/*`) let anyone who can reach the port change replies, so keep it on loopback. In Docker change
@@ -139,6 +142,12 @@ def test_reply(fakerock):
                                    messages=[{"role": "user", "content": [{"text": "hi"}]}])
     assert r["output"]["message"]["content"][0]["text"] == "Mock reply to: hi"
 ```
+
+## Examples
+
+- `examples/`: a pytest + boto3 retry recipe: throttle then succeed, give up, validation errors not retried,
+  mid-stream error.
+- `examples/github-actions.yml`: copy-paste CI, using the fixture or the Docker image as a service container.
 
 ## Controlling replies
 

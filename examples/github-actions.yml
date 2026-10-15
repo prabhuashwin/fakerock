@@ -1,0 +1,56 @@
+# Example only: not an active workflow in this repo.
+# Copy into your repo's .github/workflows/ and adjust.
+
+name: bedrock-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Option A: the pytest fixture, fakerock runs in-process. No Docker needed.
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pin once tagged: ...fakerock@v0.2.0
+      - run: pip install "fakerock[test] @ git+https://github.com/prabhuashwin/fakerock"
+      - run: pytest
+
+  # Option B: the Docker image as a service container, for any language.
+  service:
+    runs-on: ubuntu-latest
+    services:
+      fakerock:
+        image: ghcr.io/prabhuashwin/fakerock:latest
+        ports:
+          - 52999:52999
+        # No options needed: the image has its own HEALTHCHECK and Actions
+        # waits for it before running steps.
+    env:
+      AWS_ENDPOINT_URL_BEDROCK_RUNTIME: http://localhost:52999
+      AWS_ACCESS_KEY_ID: dummy
+      AWS_SECRET_ACCESS_KEY: dummy
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # Set failure modes for the run through the control API. Service
+      # containers can't mount files from the checkout, so use this instead
+      # of --scenarios / modes.json. (Tests can call these routes themselves;
+      # POST /_fakerock/reset restores the startup state.)
+      # - run: |
+      #     curl -fsS -X POST http://localhost:52999/_fakerock/modes \
+      #       -H 'content-type: application/json' \
+      #       -d '{"chat": {"_default": "throttle"}}'
+      #     curl -fsS -X POST http://localhost:52999/_fakerock/scenarios \
+      #       -H 'content-type: application/json' \
+      #       -d '[{"id": "flaky", "times": 2, "reply": {"mode": "throttle"}}]'
+      - run: pytest
