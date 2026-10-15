@@ -19,7 +19,7 @@ from mock_bedrock.control import Control, ScenarioError
 from mock_bedrock.embeddings import handle_embedding, is_embedding_model
 from mock_bedrock.converse import build_converse_response, converse_stream_events, parse_converse
 from mock_bedrock.invoke import build_invoke_response, invoke_stream_events, parse_invoke
-from mock_bedrock.packs.base import Reply, load_pack
+from mock_bedrock.packs.base import Call, Reply, load_pack
 
 ROUTE_RE = re.compile(r"^/model/(.+)/(invoke|invoke-with-response-stream|converse|converse-stream)$")
 
@@ -90,6 +90,42 @@ def resolve(app, call, family, streaming):
     return label, compute_reply(app, call, family, mode), stream_error, sid
 
 
+def _embedding_text(body):
+    """Input text(s) of an embedding request, for mode needles and scenario matching."""
+    texts = body.get("texts")
+    if isinstance(texts, list) and all(isinstance(t, str) for t in texts):
+        return "\n".join(texts)
+    text = body.get("inputText")
+    return text if isinstance(text, str) else ""
+
+
+def resolve_embedding(app, call):
+    """Modes and scenarios for embedding models. Returns (mode_label, error_reply_or_None, scenario_id);
+    a None reply means a normal embedding response."""
+    sel = app.control.select_scenario(call)
+    if sel is not None:
+        sid, spec = sel
+        mode = spec.get("mode")
+        if mode is None:
+            reply = app.control.reply_from_spec(spec)
+            failed = reply.raw_body is not None or reply.status >= 400 or reply.error_type
+            return "scenario", (reply if failed else None), sid
+        label = "scenario"
+    else:
+        sid = None
+        mode = app.control.mode_for(app.pack, call, "embedding")
+        label = mode
+    if mode in ERROR_MODES:
+        status, et, msg = ERROR_MODES[mode]
+        return label, Reply(status=status, error_type=et, message=msg), sid
+    if mode == "stream_error":
+        return label, Reply(status=500, error_type="InternalServerException",
+                            message="Internal server error (mock)"), sid
+    if mode == "stall":
+        time.sleep(app.control.stall_seconds())
+    return label, None, sid
+
+
 def _parse_json_object(body_bytes):
     if not body_bytes or not body_bytes.strip():
         raise ValueError("empty request body")
@@ -129,8 +165,11 @@ def handle_invoke(app, h, model, body_bytes, path):
         return done(error_result(400, "ValidationException", f"Malformed input request: {e}"),
                     family=None, mode=None, status=400, prompt="")
     if is_embedding_model(model):
-        return done(HttpResult(200, json.dumps(resp).encode()),
-                    family="embedding", mode="answer", status=200, texts=n)
+        call = Call(api="invoke", model=model, messages=[{"role": "user", "text": _embedding_text(body)}])
+        label, reply, sid = resolve_embedding(app, call)
+        result = reply_to_result(reply, lambda: resp) if reply is not None else HttpResult(200, json.dumps(resp).encode())
+        return done(result, family="embedding", mode=label, status=result.status, texts=n,
+                    scenario=sid if label == "scenario" else None)
     family = app.pack.family(call)
     mode, reply, _, sid = resolve(app, call, family, False)
     result = reply_to_result(reply, lambda: build_invoke_response(call, reply))

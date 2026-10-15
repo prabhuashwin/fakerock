@@ -124,8 +124,9 @@ def test_reply(fakerock):
 ## Controlling replies
 
 The pack classifies each request into a **family** (generic: `chat`, or `tools` when the
-request offers tools). The mode comes from `modes.json` in the log dir (or `--modes`),
-**re-read on every call**, so you can edit it while the server runs:
+request offers tools), or `embedding` for embedding models. The mode comes from `modes.json` in the log dir (or `--modes`),
+**re-read on every call**, so you can edit it while the server runs (write it atomically: temp
+file, then rename, since a reader can catch a half-written or empty file):
 
 ```json
 {
@@ -137,7 +138,9 @@ request offers tools). The mode comes from `modes.json` in the log dir (or `--mo
 
 Within a family, each key other than `_default` is a case-insensitive substring tested against
 the pack's mode key (generic: last user message text); first match wins, else `_default`, else
-the pack's default (`answer`). Packs may add their own families and modes.
+the pack's default (`answer`). For `embedding` the mode key is the Cohere `texts` joined with
+`"
+"`, or the Titan `inputText`. Packs may add their own families and modes.
 
 Common modes (every pack):
 - `answer`: normal pack reply
@@ -149,6 +152,10 @@ Common modes (every pack):
 - `validation`: 400 ValidationException
 - `stream_error`: streaming APIs send one delta, then a `modelStreamErrorException`;
   non-streaming APIs behave like `error`
+
+For embeddings, error modes return the mapped error, `stream_error` returns 500
+InternalServerException, `stall` sleeps then answers, and `truncate` / other modes return a normal
+embedding.
 
 **Scenarios** (`--scenarios file.json`) take precedence over modes. The first entry whose
 `match` fits wins. `match.model` and `match.prompt` are regexes (`re.search`) against the model
@@ -163,6 +170,10 @@ ID and the full prompt (system + messages). Ids must be unique.
    "reply": {"status": 503, "error_type": "ServiceUnavailableException", "message": "down"}}
 ]}
 ```
+
+Scenarios match embedding requests too (`match.model`, and `match.prompt` against the input text;
+`times`, `replies` and `mode` work). A reply spec counts as an error only with `status` >= 400 or
+`error_type`; `text`, `tool_use` and other statuses are ignored and a normal vector is returned.
 
 `reply` keys: `text`, `tool_use` (`name`, `input`, optional `id`), `stop_reason` (default
 `end_turn`, or `tool_use` with a tool call), `status`, `error_type`, `message`, `mode`.
@@ -195,7 +206,8 @@ Matched requests log `mode: "scenario"` plus `scenario: <id>`.
 Never a 500 (SDKs retry those). Returns 400 `ValidationException` for: empty body, non-object
 JSON, Anthropic body without a `messages` list, Converse body without a `messages` list,
 non-integer `max_tokens` / `inferenceConfig.maxTokens`, embedding body without `texts`
-(Cohere) / `inputText` (Titan), bad Titan v2 `dimensions`. Reported output tokens are capped at
+(Cohere) / `inputText` (Titan), bad Titan v2 `dimensions`, non-boolean Titan v2 `normalize`, Titan v2 `embeddingTypes` that is not a
+non-empty list of `"float"` / `"binary"`. Reported output tokens are capped at
 `max_tokens`. An invalid `modes.json` (bad JSON, family not an object, mode not a string) is
 ignored: the last good modes stay in force and one warning is printed when the file changes.
 An invalid scenarios file (duplicate `id`, bad regex, `tool_use` without a non-empty `name` or
@@ -217,7 +229,8 @@ Streaming responses use HTTP/1.1 chunked encoding (one chunk per event); others 
 `<log-dir>/requests.jsonl`, one JSON object per request: `at` (epoch seconds), `api`
 (`invoke`, `invoke-stream`, `converse`, `converse-stream`), `path`, `model`, `family`, `mode`
 (`scenario` when a scenario matched), `status`, `prompt`. Embedding calls log family
-`embedding` and `texts` (count) instead of `prompt`. Malformed bodies log status 400 with null
+`embedding` and `texts` (count) instead of `prompt`; they carry `mode` (label) and `scenario` like
+chat rows. Malformed bodies log status 400 with null
 family/mode. Every row also has `seq` (1-based, restarts on reset), `request_id` (equals the
 response's `x-amzn-RequestId`), `body` (parsed request JSON; null if missing/unparseable, then
 `raw` holds the first 2000 chars), `stream` (bool) and `scenario` (id, or null). Bodies are logged
@@ -265,6 +278,9 @@ imports).
 
 Vectors are deterministic hashed bag-of-words. Default dims: `amazon.titan-embed-text-v1` 1536,
 `amazon.titan-embed-text-v2*` 1024 (honours `dimensions` 256/512/1024), Cohere 1024.
+Titan v2 also honours `normalize` (default true) and `embeddingTypes` (default `["float"]`): the
+response has `embeddingsByType` with the requested types (binary = 1 if x > 0 else 0), and the
+top-level `embedding` is omitted when only `binary` is requested.
 `--embed-dims` / `MOCK_BEDROCK_EMBED_DIMS` overrides the default for all models. Similarity reflects word overlap only, not meaning. Re-index any stored
 vectors after switching back to real Bedrock.
 

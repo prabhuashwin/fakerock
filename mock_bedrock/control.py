@@ -122,6 +122,7 @@ class Control:
             warn(f"log dir {requested} is not writable ({e}); logging to {self.log_dir} instead")
         self.modes_file = Path(modes_file) if modes_file else requested / "modes.json"
         self.lock = threading.Lock()
+        self._modes_lock = threading.Lock()  # guards modes-file reload state; separate from self.lock
         self.ctx = Ctx(self.log_dir, self.lock)
         self._log_warned = False
         self._modes_good = {}
@@ -182,28 +183,29 @@ class Control:
             return override
         if self._modes_fixed is not None:
             return self._modes_fixed
-        try:
-            raw = self.modes_file.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            self._modes_good, self._modes_seen = {}, None
-            return self._modes_good
-        except OSError as e:
-            raw = f"<unreadable: {e}>"
-            if raw != self._modes_seen:
-                self._modes_seen = raw
-                warn(f"cannot read {self.modes_file}: {e}; keeping previous modes")
-            return self._modes_good
-        if raw == self._modes_seen:
-            return self._modes_good
-        self._modes_seen = raw
-        try:
-            data = json.loads(raw or "{}")
-            self._check_modes(data)
-        except ValueError as e:
-            warn(f"invalid {self.modes_file}: {e}; keeping previous modes")
-            return self._modes_good
-        self._modes_good = data
-        return data
+        with self._modes_lock:
+            try:
+                raw = self.modes_file.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                self._modes_good, self._modes_seen = {}, None
+                return self._modes_good
+            except OSError as e:
+                raw = f"<unreadable: {e}>"
+                if raw != self._modes_seen:
+                    self._modes_seen = raw
+                    warn(f"cannot read {self.modes_file}: {e}; keeping previous modes")
+                return self._modes_good
+            if raw == self._modes_seen:
+                return self._modes_good
+            self._modes_seen = raw
+            try:
+                data = json.loads(raw or "{}")
+                self._check_modes(data)
+            except ValueError as e:
+                warn(f"invalid {self.modes_file}: {e}; keeping previous modes")
+                return self._modes_good
+            self._modes_good = data
+            return data
 
     @staticmethod
     def _check_modes(data):
