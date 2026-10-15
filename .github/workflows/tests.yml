@@ -20,6 +20,36 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m pytest examples -q
 
+  js-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: examples/js/package-lock.json
+      - run: pip install -e .
+      - name: Start mock servers
+        run: |
+          python -m mock_bedrock --port 52999 &
+          python -m mock_bedrock --port 52998 --strict &
+          for i in $(seq 30); do
+            curl -sf http://127.0.0.1:52999/health && curl -sf http://127.0.0.1:52998/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:52999/health && curl -sf http://127.0.0.1:52998/health
+      - run: npm ci
+        working-directory: examples/js
+      - run: node smoke.mjs
+        working-directory: examples/js
+        env:
+          FAKEROCK_URL: http://127.0.0.1:52999
+          FAKEROCK_STRICT_URL: http://127.0.0.1:52998
+
   package:
     runs-on: ubuntu-latest
     steps:

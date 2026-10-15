@@ -9,3 +9,12 @@ Run:
     python -m pytest examples -q
 
 For CI use, see github-actions.yml.
+
+JavaScript (AWS SDK v3) smoke test, `js/smoke.mjs`. From the repo root, start two servers, then run it:
+
+    python -m mock_bedrock --port 52999 &
+    python -m mock_bedrock --port 52998 --strict &
+    cd examples/js && npm ci
+    FAKEROCK_URL=http://127.0.0.1:52999 FAKEROCK_STRICT_URL=http://127.0.0.1:52998 node smoke.mjs
+
+The client passes `requestHandler: new NodeHttpHandler()` because the SDK defaults to HTTP/2 and fakerock is HTTP/1.1.

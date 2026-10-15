@@ -127,6 +127,16 @@ r = br.invoke_model(modelId="anthropic.claude-test", body=json.dumps({
 print(json.loads(r["body"].read()))
 ```
 
+The JS SDK v3 for Bedrock Runtime uses HTTP/2 by default, and fakerock speaks HTTP/1.1 only. Pass an HTTP/1.1
+handler (`npm install @smithy/node-http-handler`), or every call fails with an HTTP/2 protocol error:
+
+```js
+import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+const br = new BedrockRuntimeClient({ region: "us-east-1", endpoint: "http://127.0.0.1:52999",
+  credentials: { accessKeyId: "dummy", secretAccessKey: "dummy" }, requestHandler: new NodeHttpHandler() });
+```
+
 ## Using it from tests
 
 ```python
@@ -168,6 +178,8 @@ def test_reply(fakerock):
 
 - `examples/`: a pytest + boto3 retry recipe: throttle then succeed, give up, validation errors not retried,
   mid-stream error.
+- `examples/js/`: JS SDK v3 smoke test (Converse, InvokeModel, both streams, an error mode, mid-stream errors,
+  strict mode). Run in CI against `fakerock` and `fakerock --strict`.
 - `examples/github-actions.yml`: copy-paste CI, using the fixture or the Docker image as a service container.
 
 ## Controlling replies

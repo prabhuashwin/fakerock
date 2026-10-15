@@ -1,0 +1,12 @@
+{
+  "name": "fakerock-js-smoke",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "3.1144.0",
+    "@smithy/node-http-handler": "4.12.1"
+  }
+}
