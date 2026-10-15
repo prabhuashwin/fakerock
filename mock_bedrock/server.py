@@ -35,6 +35,7 @@ class HttpResult:
     def __init__(self, status, body: bytes, error_type=None):
         self.status, self.body, self.error_type = status, body, error_type
         self.events = None  # list of encoded event-stream messages -> streamed response
+        self.request_id = None  # sent as x-amzn-RequestId (new uuid when None)
 
 
 def error_result(status, error_type, message):
@@ -69,6 +70,26 @@ def compute_reply(app, call, family, mode):
     return app.pack.reply(call, family, mode, app.control.ctx)
 
 
+def resolve(app, call, family, streaming):
+    """One decision point for all chat-like APIs.
+    Returns (mode_label, reply, stream_error, scenario_id)."""
+    sel = app.control.select_scenario(call)
+    if sel is not None:
+        sid, spec = sel
+        mode = spec.get("mode")
+        if mode is None:
+            return "scenario", app.control.reply_from_spec(spec), False, sid
+        label = "scenario"
+    else:
+        sid = None
+        mode = app.control.mode_for(app.pack, call, family)
+        label = mode
+    stream_error = False
+    if mode == "stream_error" and streaming:
+        stream_error, mode = True, "answer"
+    return label, compute_reply(app, call, family, mode), stream_error, sid
+
+
 def _parse_json_object(body_bytes):
     if not body_bytes or not body_bytes.strip():
         raise ValueError("empty request body")
@@ -78,10 +99,26 @@ def _parse_json_object(body_bytes):
     return body
 
 
+def _capture(body_bytes):
+    """Fields describing the request body: parsed object, or null plus truncated raw text."""
+    try:
+        return {"body": _parse_json_object(body_bytes)}
+    except ValueError:
+        return {"body": None, "raw": (body_bytes or b"").decode("utf-8", errors="replace")[:2000]}
+
+
+def _row(api, path, model, rid, stream, cap, **fields):
+    return {"at": time.time(), "api": api, "path": path, "model": model, "request_id": rid,
+            "stream": stream, **cap, "scenario": None, **fields}
+
+
 def handle_invoke(app, h, model, body_bytes, path):
-    def log(status, **extra):
-        app.control.log_request({"at": time.time(), "api": "invoke", "path": path, "model": model,
-                                 "family": None, "mode": None, "status": status, "prompt": "", **extra})
+    rid, cap = str(uuid.uuid4()), _capture(body_bytes)
+
+    def done(result, **fields):
+        result.request_id = rid
+        app.control.log_request(_row("invoke", path, model, rid, False, cap, **fields))
+        return result
     try:
         body = _parse_json_object(body_bytes)
         if is_embedding_model(model):
@@ -89,57 +126,44 @@ def handle_invoke(app, h, model, body_bytes, path):
         else:
             call = parse_invoke(model, body)
     except ValueError as e:
-        log(400)
-        return error_result(400, "ValidationException", f"Malformed input request: {e}")
+        return done(error_result(400, "ValidationException", f"Malformed input request: {e}"),
+                    family=None, mode=None, status=400, prompt="")
     if is_embedding_model(model):
-        app.control.log_request({"at": time.time(), "api": "invoke", "path": path, "model": model,
-                                 "family": "embedding", "mode": "answer", "status": 200, "texts": n})
-        return HttpResult(200, json.dumps(resp).encode())
+        return done(HttpResult(200, json.dumps(resp).encode()),
+                    family="embedding", mode="answer", status=200, texts=n)
     family = app.pack.family(call)
-    scenario = app.control.scenario_for(call)
-    if scenario is not None:
-        mode, reply = "scenario", scenario
-    else:
-        mode = app.control.mode_for(app.pack, call, family)
-        reply = compute_reply(app, call, family, mode)
+    mode, reply, _, sid = resolve(app, call, family, False)
     result = reply_to_result(reply, lambda: build_invoke_response(call, reply))
-    app.control.log_request({"at": time.time(), "api": "invoke", "path": path, "model": model,
-                             "family": family, "mode": mode, "status": result.status, "prompt": call.prompt})
-    return result
+    return done(result, family=family, mode=mode, status=result.status, prompt=call.prompt,
+                scenario=sid if mode == "scenario" else None)
 
 
 def _make_chat_handler(api, parse, build_response, stream_events=None):
     """Build a handler for converse / converse-stream / invoke-with-response-stream."""
+    streaming = stream_events is not None
+
     def handler(app, h, model, body_bytes, path):
-        def log(status, family=None, mode=None, prompt=""):
-            app.control.log_request({"at": time.time(), "api": api, "path": path, "model": model,
-                                     "family": family, "mode": mode, "status": status, "prompt": prompt})
+        rid, cap = str(uuid.uuid4()), _capture(body_bytes)
+
+        def done(result, family=None, mode=None, prompt="", scenario=None):
+            result.request_id = rid
+            app.control.log_request(_row(api, path, model, rid, streaming, cap, family=family, mode=mode,
+                                         status=result.status, prompt=prompt, scenario=scenario))
+            return result
         try:
             body = _parse_json_object(body_bytes)
-            call = parse(model, body, stream_events is not None)
+            call = parse(model, body, streaming)
         except ValueError as e:
-            log(400)
-            return error_result(400, "ValidationException", f"Malformed input request: {e}")
+            return done(error_result(400, "ValidationException", f"Malformed input request: {e}"))
         family = app.pack.family(call)
-        scenario = app.control.scenario_for(call)
-        stream_error = False
-        if scenario is not None:
-            mode, reply = "scenario", scenario
-        else:
-            mode = app.control.mode_for(app.pack, call, family)
-            if mode == "stream_error" and stream_events is not None:
-                stream_error = True
-                reply = compute_reply(app, call, family, "answer")
-            else:
-                reply = compute_reply(app, call, family, mode)
+        mode, reply, stream_error, sid = resolve(app, call, family, streaming)
         failed = reply.raw_body is not None or reply.status >= 400 or reply.error_type
-        if stream_events is None or failed:
+        if not streaming or failed:
             result = reply_to_result(reply, lambda: build_response(call, reply))
         else:
             result = HttpResult(200, b"")
             result.events = stream_events(call, reply, stream_error)
-        log(result.status, family, mode, call.prompt)
-        return result
+        return done(result, family, mode, call.prompt, sid if mode == "scenario" else None)
     return handler
 
 
@@ -161,12 +185,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            pass  # client dropped a kept-alive connection
+
     def _send(self, result: HttpResult):
         if result.events is not None:
             # Streaming: one HTTP chunk per event-stream message, then the terminating chunk.
             self.send_response(200)
             self.send_header("content-type", "application/vnd.amazon.eventstream")
-            self.send_header("x-amzn-RequestId", str(uuid.uuid4()))
+            self.send_header("x-amzn-RequestId", result.request_id or str(uuid.uuid4()))
             self.send_header("transfer-encoding", "chunked")
             self.end_headers()
             self.wfile.flush()
@@ -178,7 +208,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(result.status)
         self.send_header("content-type", "application/json")
-        self.send_header("x-amzn-RequestId", str(uuid.uuid4()))
+        self.send_header("x-amzn-RequestId", result.request_id or str(uuid.uuid4()))
         if result.error_type:
             self.send_header("x-amzn-ErrorType", result.error_type)
         self.send_header("content-length", str(len(result.body)))
@@ -200,11 +230,43 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", 0) or 0)
         return self.rfile.read(length) if length > 0 else b""
 
+    def _control(self, method, path, body):
+        """Handle /_fakerock/* routes; these are never written to the request log."""
+        control = self.app.control
+        allowed = {"/_fakerock/requests": ("GET",), "/_fakerock/scenarios": ("PUT", "POST"),
+                   "/_fakerock/modes": ("PUT", "POST"), "/_fakerock/reset": ("POST",)}
+        if path not in allowed:
+            return error_result(404, "UnknownOperationException", f"unknown path {path}")
+        if method not in allowed[path]:
+            return error_result(405, "MethodNotAllowed", f"{method} not allowed on {path}")
+        if path == "/_fakerock/requests":
+            return HttpResult(200, json.dumps({"requests": control.requests()}).encode())
+        if path == "/_fakerock/reset":
+            control.reset()
+            return HttpResult(200, b'{"ok": true}')
+        try:
+            data = json.loads(body) if body and body.strip() else None
+        except ValueError as e:
+            return error_result(400, "ValidationException", f"invalid JSON: {e}")
+        try:
+            if path == "/_fakerock/scenarios":
+                n = control.set_scenarios(data)
+                return HttpResult(200, json.dumps({"ok": True, "count": n}).encode())
+            control.set_modes(data)
+            return HttpResult(200, b'{"ok": true}')
+        except ValueError as e:  # ScenarioError is a ValueError
+            return error_result(400, "ValidationException", str(e))
+
     def do_GET(self):
         try:
             if self.headers.get("content-length") or self.headers.get("transfer-encoding"):
-                self._read_body()
-            if self.path.split("?", 1)[0] == "/health":
+                body = self._read_body()
+            else:
+                body = b""
+            path = self.path.split("?", 1)[0]
+            if path.startswith("/_fakerock/"):
+                result = self._control("GET", path, body)
+            elif path == "/health":
                 result = HttpResult(200, json.dumps({"ok": True, "pack": self.app.pack.name}).encode())
             else:
                 result = error_result(404, "UnknownOperationException", f"unknown path {self.path}")
@@ -223,7 +285,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             path = self.path.split("?", 1)[0]
             m = ROUTE_RE.match(path)
-            if not m:
+            if path.startswith("/_fakerock/"):
+                result = self._control(self.command, path, body)
+            elif not m:
                 result = error_result(404, "UnknownOperationException", f"unknown path {path}")
             else:
                 result = ROUTES[m.group(2)](self.app, self, unquote(m.group(1)), body, path)
@@ -247,9 +311,9 @@ class App:
 
 
 def make_server(host="127.0.0.1", port=52999, pack="generic", pack_options=None, log_dir=None,
-                modes_file=None, scenarios_file=None, embed_dims=None):
+                modes_file=None, scenarios_file=None, embed_dims=None, modes=None, scenarios=None):
     log_dir = Path(log_dir or "./.mock-bedrock").resolve()
-    control = Control(log_dir, modes_file, scenarios_file)
+    control = Control(log_dir, modes_file, scenarios_file, modes=modes, scenarios=scenarios)
     pack_obj = load_pack(pack, pack_options or {}) if isinstance(pack, str) else pack
     app = App(pack_obj, control, embed_dims)
     handler = type("BoundHandler", (Handler,), {"app": app})

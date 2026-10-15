@@ -25,7 +25,7 @@ Why use it:
 
 | Path | Contents |
 |---|---|
-| `mock_bedrock/` | The server: routing and modes (`server.py`), InvokeModel (`invoke.py`), Converse (`converse.py`), AWS event-stream encoding (`eventstream.py`), embeddings (`embeddings.py`), live controls and request log (`control.py`) |
+| `mock_bedrock/` | The server: routing and modes (`server.py`), InvokeModel (`invoke.py`), Converse (`converse.py`), AWS event-stream encoding (`eventstream.py`), embeddings (`embeddings.py`), live controls and request log (`control.py`), in-test server (`testing.py`), pytest fixture (`pytest_plugin.py`) |
 | `mock_bedrock/packs/` | Reply packs: the pack interface (`base.py`) and the default echo pack (`generic.py`) |
 | `tests/` | Unit, streaming, hardening and boto3 contract tests |
 | `Dockerfile`, `docker-compose.example.yml` | Container image and an example compose service (published on loopback only) |
@@ -61,7 +61,8 @@ docker run ... mock-bedrock --scenarios /data/scenarios.json
 ```
 
 `docker-compose.example.yml` shows a loopback-only publish and a sibling container. The image binds `0.0.0.0` inside
-the container only; do not publish the port on a non-loopback host interface. In Docker change
+the container only; do not publish the port on a non-loopback host interface. The control routes
+(`/_fakerock/*`) let anyone who can reach the port change replies, so keep it on loopback. In Docker change
 the port with `-e MOCK_BEDROCK_PORT=...`, not `--port`: the healthcheck reads that variable.
 If `/data` is not writable (e.g. a bind mount owned by another uid) the server warns once on
 stderr and logs to a temp dir; `modes.json` is still read from `/data`. A failed log write never
@@ -83,6 +84,41 @@ r = br.invoke_model(modelId="anthropic.claude-test", body=json.dumps({
     "anthropic_version": "bedrock-2023-05-31", "max_tokens": 100,
     "messages": [{"role": "user", "content": "hi"}]}))
 print(json.loads(r["body"].read()))
+```
+
+## Using it from tests
+
+```python
+from mock_bedrock.testing import MockBedrock
+
+with MockBedrock(modes={"chat": {"_default": "throttle"}}) as mock:   # random free port
+    br = mock.client()            # boto3 client; or use mock.endpoint_url
+```
+
+Per-test control (also on `FakerockClient(base_url)` for a server started elsewhere):
+
+```python
+mock.set_scenarios([{"id": "t", "match": {"prompt": "hi"}, "reply": {"text": "yo"}}])  # replaces active list
+mock.set_modes({"chat": {"_default": "throttle"}})   # overrides modes.json / startup modes
+mock.requests(api="converse", model=None)            # captured rows, optionally filtered
+mock.last_request()                                  # newest row or None
+mock.reset()                                         # startup scenarios/modes, clears requests
+```
+
+Server errors raise `RuntimeError` with the server's message.
+
+`modes` is a dict (fixed for the server's life unless `set_modes` is called); `scenarios` is a list, a dict with a `scenarios`
+list, or a path to a scenarios file. Bad values raise at start. Logs go to a temp dir
+(`mock.log_dir`) that is removed on stop unless you pass `log_dir`.
+
+pytest: add `pytest_plugins = ["mock_bedrock.pytest_plugin"]` to `conftest.py`, then take the
+`fakerock` fixture (a started `MockBedrock`, one per test, xdist-safe):
+
+```python
+def test_reply(fakerock):
+    r = fakerock.client().converse(modelId="anthropic.claude-test",
+                                   messages=[{"role": "user", "content": [{"text": "hi"}]}])
+    assert r["output"]["message"]["content"][0]["text"] == "Mock reply to: hi"
 ```
 
 ## Controlling replies
@@ -129,7 +165,30 @@ ID and the full prompt (system + messages). Ids must be unique.
 ```
 
 `reply` keys: `text`, `tool_use` (`name`, `input`, optional `id`), `stop_reason` (default
-`end_turn`, or `tool_use` with a tool call), `status`, `error_type`, `message`.
+`end_turn`, or `tool_use` with a tool call), `status`, `error_type`, `message`, `mode`.
+
+Sequences: a scenario can also have
+- `times` (positive int): matches at most that many times, then is skipped and matching continues
+  with later scenarios, then modes.
+- `replies` (non-empty list, instead of `reply`, not both): used in order on successive matches;
+  the last one repeats.
+- reply `mode`: one of the common modes above (`answer`, `throttle`, `stream_error`, ...). The reply
+  comes from the normal mode machinery (`stall` uses `_stall_seconds`); other keys in that reply
+  object are ignored.
+
+```json
+{"scenarios": [
+  {"id": "flaky", "times": 2, "reply": {"mode": "throttle"}},
+  {"id": "loop", "match": {"prompt": "weather"}, "times": 3, "replies": [
+    {"tool_use": {"name": "get_city", "input": {}}},
+    {"tool_use": {"name": "get_weather", "input": {"city": "Oslo"}}},
+    {"text": "It is 5C in Oslo."}]}
+]}
+```
+
+Per-scenario match counters are cleared by `reset()` (`POST /_fakerock/reset`) and whenever the
+scenario list is replaced (`set_scenarios`). A scenario skipped because `times` ran out does not count.
+Matched requests log `mode: "scenario"` plus `scenario: <id>`.
 
 ## Validation and bad config
 
@@ -142,6 +201,14 @@ ignored: the last good modes stay in force and one warning is printed when the f
 An invalid scenarios file (duplicate `id`, bad regex, `tool_use` without a non-empty `name` or
 with non-object `input`, non-integer `status`) stops startup with a message naming the scenario.
 
+Error modes look real to AWS SDKs: throttle, 503 and 500 are retried by boto3 (standard and legacy
+modes), validation is not (`tests/test_boto3_retries.py`). Throttle twice, then succeed:
+
+```python
+with MockBedrock(scenarios=[{"id": "f", "times": 2, "reply": {"mode": "throttle"}}]) as fr:
+    fr.client().converse(modelId=m, messages=msgs); assert len(fr.requests()) == 3
+```
+
 Streaming responses use HTTP/1.1 chunked encoding (one chunk per event); others carry
 `content-length`; connections are keep-alive.
 
@@ -151,7 +218,22 @@ Streaming responses use HTTP/1.1 chunked encoding (one chunk per event); others 
 (`invoke`, `invoke-stream`, `converse`, `converse-stream`), `path`, `model`, `family`, `mode`
 (`scenario` when a scenario matched), `status`, `prompt`. Embedding calls log family
 `embedding` and `texts` (count) instead of `prompt`. Malformed bodies log status 400 with null
-family/mode. Packs may write extra `*.jsonl` files to the same directory.
+family/mode. Every row also has `seq` (1-based, restarts on reset), `request_id` (equals the
+response's `x-amzn-RequestId`), `body` (parsed request JSON; null if missing/unparseable, then
+`raw` holds the first 2000 chars), `stream` (bool) and `scenario` (id, or null). Bodies are logged
+in full, so prompts and images land in the log dir. Packs may write extra `*.jsonl` files to the same directory. The same rows are
+available via `GET /_fakerock/requests` (in memory, last 10,000).
+
+## Control API
+
+For non-Python tests or Docker. JSON bodies; control calls are not logged.
+
+- `GET /_fakerock/requests` -> `{"requests": [...]}`
+- `PUT|POST /_fakerock/scenarios` (list or `{"scenarios": [...]}`) -> `{"ok": true, "count": n}`
+- `PUT|POST /_fakerock/modes` (modes object) -> `{"ok": true}`
+- `POST /_fakerock/reset` -> `{"ok": true}`
+
+Invalid input -> 400 `ValidationException`; unknown path -> 404; wrong method -> 405.
 
 ## Packs and writing your own
 

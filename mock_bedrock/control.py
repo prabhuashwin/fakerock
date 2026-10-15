@@ -1,4 +1,5 @@
 """Runtime control: modes.json, scenarios.json and the request log."""
+import collections
 import json
 import re
 import sys
@@ -24,8 +25,33 @@ def load_scenarios(path) -> list:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise ScenarioError(f"cannot read scenarios file {path}: {e}")
+    return validate_scenarios(data, f"scenarios file {path}")
+
+
+COMMON_MODES = ("answer", "stall", "truncate", "throttle", "unavailable", "error", "validation", "stream_error")
+
+
+def _validate_reply(r, label):
+    if not isinstance(r, dict):
+        raise ScenarioError(f"{label} must be an object")
+    mode = r.get("mode")
+    if mode is not None and mode not in COMMON_MODES:
+        raise ScenarioError(f"{label}.mode must be one of {', '.join(COMMON_MODES)}")
+    tu = r.get("tool_use")
+    if tu is not None:
+        if not isinstance(tu, dict) or not isinstance(tu.get("name"), str) or not tu["name"]:
+            raise ScenarioError(f"{label}.tool_use must be an object with a non-empty 'name'")
+        if not isinstance(tu.get("input", {}), dict):
+            raise ScenarioError(f"{label}.tool_use.input must be an object")
+    st = r.get("status", 200)
+    if not isinstance(st, int) or isinstance(st, bool):
+        raise ScenarioError(f"{label}.status must be an integer")
+
+
+def validate_scenarios(data, source="scenarios") -> list:
+    """Validate parsed scenarios (object with a 'scenarios' list); returns the list."""
     if not isinstance(data, dict) or not isinstance(data.get("scenarios", []), list):
-        raise ScenarioError(f"scenarios file {path}: expected an object with a 'scenarios' list")
+        raise ScenarioError(f"{source}: expected an object with a 'scenarios' list")
     out, seen = [], set()
     for n, sc in enumerate(data.get("scenarios", [])):
         if not isinstance(sc, dict):
@@ -44,18 +70,20 @@ def load_scenarios(path) -> list:
                     re.compile(m[k])
                 except (re.error, TypeError) as e:
                     raise ScenarioError(f"{label}: match.{k} is not a valid regex: {e}")
-        r = sc.get("reply") or {}
-        if not isinstance(r, dict):
-            raise ScenarioError(f"{label}: 'reply' must be an object")
-        tu = r.get("tool_use")
-        if tu is not None:
-            if not isinstance(tu, dict) or not isinstance(tu.get("name"), str) or not tu["name"]:
-                raise ScenarioError(f"{label}: reply.tool_use must be an object with a non-empty 'name'")
-            if not isinstance(tu.get("input", {}), dict):
-                raise ScenarioError(f"{label}: reply.tool_use.input must be an object")
-        st = r.get("status", 200)
-        if not isinstance(st, int) or isinstance(st, bool):
-            raise ScenarioError(f"{label}: reply.status must be an integer")
+        if "reply" in sc and "replies" in sc:
+            raise ScenarioError(f"{label}: use either 'reply' or 'replies', not both")
+        if "times" in sc:
+            t = sc["times"]
+            if not isinstance(t, int) or isinstance(t, bool) or t < 1:
+                raise ScenarioError(f"{label}: 'times' must be a positive integer")
+        if "replies" in sc:
+            rs = sc["replies"]
+            if not isinstance(rs, list) or not rs:
+                raise ScenarioError(f"{label}: 'replies' must be a non-empty list of reply objects")
+            for i, r in enumerate(rs):
+                _validate_reply(r, f"{label}: replies[{i}]")
+        else:
+            _validate_reply(sc.get("reply") or {}, f"{label}: reply")
         out.append(sc)
     return out
 
@@ -81,7 +109,7 @@ class Ctx:
 
 
 class Control:
-    def __init__(self, log_dir, modes_file=None, scenarios_file=None):
+    def __init__(self, log_dir, modes_file=None, scenarios_file=None, *, modes=None, scenarios=None):
         requested = Path(log_dir)
         self.log_dir = requested
         try:
@@ -98,9 +126,62 @@ class Control:
         self._log_warned = False
         self._modes_good = {}
         self._modes_seen = None  # last raw content already parsed/reported
-        self.scenarios = load_scenarios(scenarios_file) if scenarios_file else []
+        if scenarios is not None:
+            self._startup_scenarios = validate_scenarios(
+                {"scenarios": scenarios} if isinstance(scenarios, list) else scenarios)
+        else:
+            self._startup_scenarios = load_scenarios(scenarios_file) if scenarios_file else []
+        self.scenarios = self._startup_scenarios
+        self._modes_fixed = None
+        if modes is not None:
+            self._check_modes(modes)
+            self._modes_fixed = modes
+        self._modes_override = None  # set via set_modes(); wins over file/init modes until reset()
+        self._requests = collections.deque(maxlen=10000)
+        self._seq = 0
+        # Callables run by reset(); later steps (per-scenario counters) register here.
+        self._reset_hooks = [self._counts_clear]
+        self._counts = {}  # scenario list index -> times selected
+
+    def _counts_clear(self):
+        self._counts.clear()  # called with self.lock held
+
+    def requests(self) -> list:
+        with self.lock:
+            return list(self._requests)
+
+    def set_scenarios(self, data) -> int:
+        if isinstance(data, list):
+            data = {"scenarios": data}
+        new = validate_scenarios(data, "scenarios")
+        with self.lock:
+            self.scenarios = new
+            self._counts.clear()
+        return len(new)
+
+    def set_modes(self, data):
+        try:
+            self._check_modes(data)
+        except ValueError as e:
+            raise ValueError(f"invalid modes: {e}")
+        with self.lock:
+            self._modes_override = data
+
+    def reset(self):
+        with self.lock:
+            self._requests.clear()
+            self._seq = 0
+            self._modes_override = None
+            self.scenarios = self._startup_scenarios
+            for hook in self._reset_hooks:
+                hook()
 
     def _modes(self) -> dict:
+        override = self._modes_override
+        if override is not None:
+            return override
+        if self._modes_fixed is not None:
+            return self._modes_fixed
         try:
             raw = self.modes_file.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -150,25 +231,48 @@ class Control:
     def stall_seconds(self) -> float:
         return float(self._modes().get("_stall_seconds", 60))
 
-    def scenario_for(self, call: Call):
-        for sc in self.scenarios:
-            m = sc.get("match") or {}
-            if "model" in m and not re.search(m["model"], call.model):
-                continue
-            if "prompt" in m and not re.search(m["prompt"], call.prompt):
-                continue
-            r = sc.get("reply") or {}
-            tu = r.get("tool_use")
-            if tu is not None:
-                tu = {"id": tu.get("id", "tooluse_scenario"), "name": tu["name"], "input": tu.get("input", {})}
-            status = int(r.get("status", 200))
-            return Reply(text=r.get("text", ""), tool_use=tu,
-                         stop_reason=r.get("stop_reason", "tool_use" if tu else "end_turn"),
-                         status=status, error_type=r.get("error_type"),
-                         message=r.get("message", r.get("text", "") if status >= 400 else ""))
+    def select_scenario(self, call: Call):
+        """First matching scenario with 'times' left; counts the match atomically.
+        Returns (scenario_id, reply_spec_dict) or None."""
+        with self.lock:
+            for idx, sc in enumerate(self.scenarios):
+                m = sc.get("match") or {}
+                if "model" in m and not re.search(m["model"], call.model):
+                    continue
+                if "prompt" in m and not re.search(m["prompt"], call.prompt):
+                    continue
+                n = self._counts.get(idx, 0)
+                times = sc.get("times")
+                if times is not None and n >= times:
+                    continue
+                self._counts[idx] = n + 1
+                if "replies" in sc:
+                    spec = sc["replies"][min(n, len(sc["replies"]) - 1)]
+                else:
+                    spec = sc.get("reply") or {}
+                return sc.get("id"), spec
         return None
 
+    @staticmethod
+    def reply_from_spec(r: dict) -> Reply:
+        tu = r.get("tool_use")
+        if tu is not None:
+            tu = {"id": tu.get("id", "tooluse_scenario"), "name": tu["name"], "input": tu.get("input", {})}
+        status = int(r.get("status", 200))
+        return Reply(text=r.get("text", ""), tool_use=tu,
+                     stop_reason=r.get("stop_reason", "tool_use" if tu else "end_turn"),
+                     status=status, error_type=r.get("error_type"),
+                     message=r.get("message", r.get("text", "") if status >= 400 else ""))
+
+    def scenario_for(self, call: Call):
+        sel = self.select_scenario(call)
+        return self.reply_from_spec(sel[1]) if sel else None
+
     def log_request(self, row: dict):
+        with self.lock:
+            self._seq += 1
+            row = {"seq": self._seq, **row}
+            self._requests.append(row)
         try:
             with self.lock, (self.log_dir / "requests.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
