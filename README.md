@@ -21,6 +21,25 @@ Why use it:
   endpoint URL. Python 3 standard library only, so it also ships as a tiny Docker image.
 - **Your own replies.** A small "pack" file decides what the mock answers for your app.
 
+## How it compares
+
+General AWS emulators cover Bedrock as one service among many, and most aim to give *real* model
+output (by proxying to Ollama/vLLM). fakerock does the opposite: canned, repeatable replies and
+Bedrock-specific failures you can switch on per test. It fits best next to those tools, not instead
+of them.
+
+| | fakerock | LocalStack | MiniStack | Moto | Floci |
+|---|---|---|---|---|---|
+| Bedrock Runtime ops | InvokeModel, InvokeModelWithResponseStream, Converse, ConverseStream | Converse, InvokeModel, InvokeModelWithBidirectionalStream | Converse(Stream), InvokeModel(WithResponseStream), ApplyGuardrail, async invoke | `invoke_model` only | Converse, InvokeModel (streaming returns 501) |
+| Replies | Canned, from a pack; repeatable | Real model via Ollama | Mock, or proxy to Ollama / llama.cpp / vLLM | Mocked | Canned stub |
+| Bedrock failure injection (throttle, stream errors, stalls, validation) | Built in, switchable per test or at runtime | Generic Chaos API (5xx, latency) on paid plans | None documented | None documented | None documented |
+| Request capture for asserts | Yes (`mock.requests()`) | Not documented | Not documented | Not documented | Not documented |
+| Pricing / licence | Free, MIT | Bedrock needs the Ultimate plan | Free, MIT | Free, Apache-2.0 | Free, open source |
+| Footprint | Python stdlib, one process | Docker + Ollama model download | Python / Docker, 60+ services | Python library | Docker, many services |
+
+Checked against each project's docs on 2026-10-15; these tools move quickly, so confirm before relying
+on a cell. Corrections welcome.
+
 ## What's in this repo
 
 | Path | Contents |
