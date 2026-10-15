@@ -43,6 +43,7 @@ class Reply:
     error_type: Optional[str] = None
     raw_body: Optional[bytes] = None      # sent verbatim with status
     message: str = ""                     # error message
+    drop: bool = False                    # close the connection instead of (fully) replying
 
     def tokens(self, cap: Optional[int] = None) -> int:
         n = self.output_tokens if self.output_tokens is not None else max(1, len(self.text) // 4)

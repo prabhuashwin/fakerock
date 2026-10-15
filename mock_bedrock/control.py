@@ -1,6 +1,7 @@
 """Runtime control: modes.json, scenarios.json and the request log."""
 import collections
 import json
+import math
 import re
 import sys
 import tempfile
@@ -28,7 +29,20 @@ def load_scenarios(path) -> list:
     return validate_scenarios(data, f"scenarios file {path}")
 
 
-COMMON_MODES = ("answer", "stall", "truncate", "throttle", "unavailable", "error", "validation", "stream_error")
+# mode -> (HTTP status, error type, message); statuses match botocore's bedrock-runtime model.
+ERROR_MODES = {
+    "throttle": (429, "ThrottlingException", "Too many requests (mock)"),
+    "unavailable": (503, "ServiceUnavailableException", "Service unavailable (mock)"),
+    "error": (500, "InternalServerException", "Internal server error (mock)"),
+    "validation": (400, "ValidationException", "Validation error (mock)"),
+    "model_timeout": (408, "ModelTimeoutException", "Model timed out (mock)"),
+    "model_not_ready": (429, "ModelNotReadyException", "Model not ready (mock)"),
+    "access_denied": (403, "AccessDeniedException", "Access denied (mock)"),
+    "not_found": (404, "ResourceNotFoundException", "Resource not found (mock)"),
+    "quota_exceeded": (400, "ServiceQuotaExceededException", "Service quota exceeded (mock)"),
+    "model_error": (424, "ModelErrorException", "Model error (mock)"),
+}
+COMMON_MODES = ("answer", "stall", "truncate", *ERROR_MODES, "stream_error", "drop")
 
 
 def _validate_reply(r, label):
@@ -212,9 +226,10 @@ class Control:
         if not isinstance(data, dict):
             raise ValueError("top level must be an object")
         for fam, val in data.items():
-            if fam == "_stall_seconds":
-                if isinstance(val, bool) or not isinstance(val, (int, float)):
-                    raise ValueError("_stall_seconds must be a number")
+            if fam in ("_stall_seconds", "_latency_seconds", "_chunk_delay_seconds"):
+                if (isinstance(val, bool) or not isinstance(val, (int, float))
+                        or not (val >= 0 and math.isfinite(val))):
+                    raise ValueError(f"{fam} must be a finite number >= 0")
                 continue
             if not isinstance(val, dict):
                 raise ValueError(f"family {fam!r} must be an object")
@@ -232,6 +247,12 @@ class Control:
 
     def stall_seconds(self) -> float:
         return float(self._modes().get("_stall_seconds", 60))
+
+    def latency_seconds(self) -> float:
+        return float(self._modes().get("_latency_seconds", 0))
+
+    def chunk_delay_seconds(self) -> float:
+        return float(self._modes().get("_chunk_delay_seconds", 0))
 
     def select_scenario(self, call: Call):
         """First matching scenario with 'times' left; counts the match atomically.

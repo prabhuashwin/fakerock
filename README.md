@@ -14,8 +14,9 @@ Why use it:
 
 - **No cost, no AWS account.** Develop and run CI without Bedrock calls or credentials.
 - **Repeatable.** The same request gets the same reply, so tests don't flake on model output.
-- **Failures on demand.** Throttling, outages, stalls, truncated or broken streams, and
-  validation errors can be switched on without restarting, so you can test retry and
+- **Failures on demand.** The full set of Bedrock errors (throttling, timeouts, access denied,
+  quota, outages, validation), stalls, added latency, dropped connections, and truncated or
+  broken streams can be switched on without restarting, so you can test retry and
   error handling.
 - **Drop-in.** Real AWS SDKs (boto3 is tested) work unchanged; you only override the
   endpoint URL. Python 3 standard library only, so it also ships as a tiny Docker image.
@@ -32,7 +33,7 @@ of them.
 |---|---|---|---|---|---|
 | Bedrock Runtime ops | InvokeModel, InvokeModelWithResponseStream, Converse, ConverseStream | Converse, InvokeModel, InvokeModelWithBidirectionalStream | Converse(Stream), InvokeModel(WithResponseStream), ApplyGuardrail, async invoke | `invoke_model` only | Converse, InvokeModel (streaming returns 501) |
 | Replies | Canned, from a pack; repeatable | Real model via Ollama | Mock, or proxy to Ollama / llama.cpp / vLLM | Mocked | Canned stub |
-| Bedrock failure injection (throttle, stream errors, stalls, validation) | Built in, switchable per test or at runtime | Generic Chaos API (5xx, latency) on paid plans | None documented | None documented | None documented |
+| Bedrock failure injection (all modelled errors, stream errors, stalls, latency, dropped connections) | Built in, switchable per test or at runtime | Generic Chaos API (5xx, latency) on paid plans | None documented | None documented | None documented |
 | Request capture for asserts | Yes (`mock.requests()`) | Not documented | Not documented | Not documented | Not documented |
 | Pricing / licence | Free, MIT | Bedrock needs the Ultimate plan | Free, MIT | Free, Apache-2.0 | Free, open source |
 | Footprint | Python stdlib, one process | Docker + Ollama model download | Python / Docker, 60+ services | Python library | Docker, many services |
@@ -197,12 +198,32 @@ Common modes (every pack):
 - `unavailable`: 503 ServiceUnavailableException
 - `error`: 500 InternalServerException
 - `validation`: 400 ValidationException
+- `model_timeout`: 408 ModelTimeoutException
+- `model_not_ready`: 429 ModelNotReadyException
+- `access_denied`: 403 AccessDeniedException
+- `not_found`: 404 ResourceNotFoundException
+- `quota_exceeded`: 400 ServiceQuotaExceededException
+- `model_error`: 424 ModelErrorException
 - `stream_error`: streaming APIs send one delta, then a `modelStreamErrorException`;
   non-streaming APIs behave like `error`
+- `drop`: non-streaming calls get the connection closed with no response; streaming calls get
+  headers and one event, then the connection closes without the terminating chunk. The request
+  log records status 0. Useful for testing client connection-error handling. SDKs retry
+  connection errors, so a `"times": 1` drop scenario is used up by the first attempt and the retry
+  succeeds. With boto3, a stream cut off mid-way raises urllib3 `ProtocolError`, which is not a
+  `BotoCoreError`.
+
+The error modes above (`throttle` through `model_error`) work for chat APIs, InvokeModel and
+embeddings, and as a scenario `mode`. Streaming APIs return them as the HTTP error before any
+stream starts.
+
+Two more top-level keys in `modes.json` (non-negative numbers, alongside `_stall_seconds`):
+`_latency_seconds` (default 0) adds a delay before every model reply in any mode, and
+`_chunk_delay_seconds` (default 0) adds a delay between streamed events.
 
 For embeddings, error modes return the mapped error, `stream_error` returns 500
-InternalServerException, `stall` sleeps then answers, and `truncate` / other modes return a normal
-embedding.
+InternalServerException, `drop` closes the connection, `stall` sleeps then answers, and
+`truncate` / other modes return a normal embedding.
 
 **Scenarios** (`--scenarios file.json`) take precedence over modes. The first entry whose
 `match` fits wins. `match.model` and `match.prompt` are regexes (`re.search`) against the model

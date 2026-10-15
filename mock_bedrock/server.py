@@ -1,13 +1,19 @@
 """HTTP server: routes, common modes, error shaping, request logging.
 
 Supported APIs: InvokeModel, InvokeModelWithResponseStream, Converse, ConverseStream.
-Common modes: answer, stall, truncate, throttle, unavailable, error, validation, stream_error
-(stream_error: streaming APIs emit a first delta then a modelStreamErrorException; others act like error).
+Common modes: answer, stall, truncate, stream_error, drop, plus the error modes in control.ERROR_MODES:
+throttle, unavailable, error, validation, model_timeout, model_not_ready, access_denied, not_found,
+quota_exceeded, model_error.
+(stream_error: streaming APIs emit a first delta then a modelStreamErrorException; others act like error.
+drop: non-streaming APIs close the connection with no response; streaming APIs send the first event, then close.)
+modes.json also accepts _stall_seconds, _latency_seconds (delay before every reply) and
+_chunk_delay_seconds (delay between streamed events).
 """
 import argparse
 import json
 import os
 import re
+import socket
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,7 +21,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from mock_bedrock import __version__
-from mock_bedrock.control import Control, ScenarioError
+from mock_bedrock.control import ERROR_MODES, Control, ScenarioError
 from mock_bedrock.ids import IdSource
 from mock_bedrock.embeddings import handle_embedding, is_embedding_model
 from mock_bedrock.converse import build_converse_response, converse_stream_events, parse_converse
@@ -24,17 +30,10 @@ from mock_bedrock.packs.base import Call, Reply, load_pack
 
 ROUTE_RE = re.compile(r"^/model/(.+)/(invoke|invoke-with-response-stream|converse|converse-stream)$")
 
-ERROR_MODES = {
-    "throttle": (429, "ThrottlingException", "Too many requests (mock)"),
-    "unavailable": (503, "ServiceUnavailableException", "Service unavailable (mock)"),
-    "error": (500, "InternalServerException", "Internal server error (mock)"),
-    "validation": (400, "ValidationException", "Validation error (mock)"),
-}
-
-
 class HttpResult:
     def __init__(self, status, body: bytes, error_type=None):
         self.status, self.body, self.error_type = status, body, error_type
+        self.drop = False  # close the connection instead of (fully) responding
         self.events = None  # list of encoded event-stream messages -> streamed response
         self.request_id = None  # sent as x-amzn-RequestId (new uuid when None)
 
@@ -50,11 +49,17 @@ def reply_to_result(reply: Reply, ok_builder):
         return error_result(reply.status if reply.status >= 400 else 500,
                             reply.error_type or "InternalServerException",
                             reply.message or "mock error")
-    return HttpResult(reply.status, json.dumps(ok_builder()).encode())
+    result = HttpResult(reply.status, json.dumps(ok_builder()).encode())
+    result.drop = reply.drop
+    return result
 
 
 def compute_reply(app, call, family, mode):
     """Apply the common modes; everything else goes to the pack. Returns a Reply."""
+    if mode == "drop":
+        r = app.pack.reply(call, family, "answer", app.control.ctx)
+        r.drop = True
+        return r
     if mode in ERROR_MODES:
         status, et, msg = ERROR_MODES[mode]
         return Reply(status=status, error_type=et, message=msg)
@@ -71,9 +76,16 @@ def compute_reply(app, call, family, mode):
     return app.pack.reply(call, family, mode, app.control.ctx)
 
 
+def _latency(app):
+    delay = app.control.latency_seconds()
+    if delay > 0:
+        time.sleep(delay)
+
+
 def resolve(app, call, family, streaming):
     """One decision point for all chat-like APIs.
     Returns (mode_label, reply, stream_error, scenario_id)."""
+    _latency(app)
     sel = app.control.select_scenario(call)
     if sel is not None:
         sid, spec = sel
@@ -103,6 +115,7 @@ def _embedding_text(body):
 def resolve_embedding(app, call):
     """Modes and scenarios for embedding models. Returns (mode_label, error_reply_or_None, scenario_id);
     a None reply means a normal embedding response."""
+    _latency(app)
     sel = app.control.select_scenario(call)
     if sel is not None:
         sid, spec = sel
@@ -116,6 +129,8 @@ def resolve_embedding(app, call):
         sid = None
         mode = app.control.mode_for(app.pack, call, "embedding")
         label = mode
+    if mode == "drop":
+        return label, Reply(drop=True), sid
     if mode in ERROR_MODES:
         status, et, msg = ERROR_MODES[mode]
         return label, Reply(status=status, error_type=et, message=msg), sid
@@ -169,12 +184,12 @@ def handle_invoke(app, h, model, body_bytes, path):
         call = Call(api="invoke", model=model, messages=[{"role": "user", "text": _embedding_text(body)}])
         label, reply, sid = resolve_embedding(app, call)
         result = reply_to_result(reply, lambda: resp) if reply is not None else HttpResult(200, json.dumps(resp).encode())
-        return done(result, family="embedding", mode=label, status=result.status, texts=n,
+        return done(result, family="embedding", mode=label, status=0 if result.drop else result.status, texts=n,
                     scenario=sid if label == "scenario" else None)
     family = app.pack.family(call)
     mode, reply, _, sid = resolve(app, call, family, False)
     result = reply_to_result(reply, lambda: build_invoke_response(call, reply, app.ids.msg_id()))
-    return done(result, family=family, mode=mode, status=result.status, prompt=call.prompt,
+    return done(result, family=family, mode=mode, status=0 if result.drop else result.status, prompt=call.prompt,
                 scenario=sid if mode == "scenario" else None)
 
 
@@ -189,7 +204,8 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
         def done(result, family=None, mode=None, prompt="", scenario=None):
             result.request_id = rid
             app.control.log_request(_row(api, path, model, rid, streaming, cap, family=family, mode=mode,
-                                         status=result.status, prompt=prompt, scenario=scenario))
+                                         status=0 if result.drop else result.status, prompt=prompt,
+                                         scenario=scenario))
             return result
         try:
             body = _parse_json_object(body_bytes)
@@ -204,6 +220,7 @@ def _make_chat_handler(api, parse, build_response, stream_events=None):
         else:
             result = HttpResult(200, b"")
             result.events = stream_events(call, reply, stream_error, **kw())
+            result.drop = reply.drop
         return done(result, family, mode, call.prompt, sid if mode == "scenario" else None)
     return handler
 
@@ -232,7 +249,18 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass  # client dropped a kept-alive connection
 
+    def _hang_up(self):
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def _send(self, result: HttpResult):
+        if result.drop and result.events is None:
+            self._hang_up()
+            return
         if result.events is not None:
             # Streaming: one HTTP chunk per event-stream message, then the terminating chunk.
             self.send_response(200)
@@ -241,9 +269,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("transfer-encoding", "chunked")
             self.end_headers()
             self.wfile.flush()
-            for ev in result.events:
+            delay = self.app.control.chunk_delay_seconds()
+            for i, ev in enumerate(result.events):
+                if i and delay > 0:
+                    time.sleep(delay)
                 self.wfile.write(b"%x\r\n" % len(ev) + ev + b"\r\n")
                 self.wfile.flush()
+                if result.drop:  # first event sent; hang up without the terminating chunk
+                    self._hang_up()
+                    return
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
             return
