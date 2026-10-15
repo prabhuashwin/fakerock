@@ -13,11 +13,11 @@ jobs:
   fixture:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # Pin once tagged: ...fakerock@v0.2.0
+      # Pin once tagged: ...fakerock@v0.3.0
       - run: pip install "fakerock[test] @ git+https://github.com/prabhuashwin/fakerock"
       - run: pytest
 
@@ -37,8 +37,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: dummy
       AWS_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
