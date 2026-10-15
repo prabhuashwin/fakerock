@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # Pin once tagged: ...fakerock@v0.3.0
+      # Pin once tagged: ...fakerock@v0.4.0
       - run: pip install "fakerock[test] @ git+https://github.com/prabhuashwin/fakerock"
       - run: pytest
 

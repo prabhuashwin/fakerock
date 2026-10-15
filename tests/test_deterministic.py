@@ -76,7 +76,7 @@ class TestDeterministic(unittest.TestCase):
             main(["--version"])
         self.assertEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), f"mock_bedrock {__version__}")
-        self.assertEqual(__version__, "0.3.0")
+        self.assertEqual(__version__, "0.4.0")
 
 
 if __name__ == "__main__":
