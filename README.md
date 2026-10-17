@@ -6,6 +6,10 @@ A local, stdlib-only Python stand-in for the **Amazon Bedrock Runtime** API (AWS
 run an app or its tests against Bedrock-shaped responses. It never contacts AWS, never uses real
 credentials, and costs nothing.
 
+Naming: the project, the command and the pytest fixture are `fakerock`; the Python package you import is
+`mock_bedrock`, which is also the prefix of the `MOCK_BEDROCK_*` environment variables and the `.mock-bedrock`
+log directory. Both names refer to the same thing.
+
 > **Unofficial.** This project is not affiliated with, endorsed by, or supported by Amazon Web
 > Services. "AWS", "Amazon Bedrock" and related names are trademarks of Amazon.com, Inc. or its
 > affiliates and are used here only to describe what the mock is compatible with.
@@ -62,8 +66,9 @@ Anything else returns 404 `UnknownOperationException`.
 
 ## Quick start
 
-Install (not on PyPI yet): `pip install git+https://github.com/prabhuashwin/fakerock`, or
-`pip install -e .` from a checkout. That gives you the `fakerock` command (alias `mock-bedrock`).
+Install: `pip install git+https://github.com/prabhuashwin/fakerock`, or `pip install -e .` from a
+checkout; a PyPI release (`pip install fakerock`) is published automatically from the next version tag. Either
+way you get the `fakerock` command (alias `mock-bedrock`).
 From a checkout you can also run without installing, using `python -m mock_bedrock`.
 
 ```
@@ -419,7 +424,7 @@ and HTTP/1.1 chunked streams) but has not been tested yet.
 
 ```
 pip install -e ".[test]"   # boto3 + pytest (requirements-dev.txt has the same)
-python -m unittest discover -s tests
+python -m pytest tests examples -q
 ```
 
 Without boto3 the contract tests are skipped and the rest still run. CI runs on every push and pull
@@ -428,12 +433,15 @@ test (normal and `--strict`), and a Docker image build.
 
 ## Releases
 
-- **0.4.0:** mid-stream error modes and `_stream_error_after`; opt-in strict request validation
-  (`--strict`); JS SDK v3 smoke test in CI; sdist now includes the test helpers.
-- **0.3.0:** the full set of Bedrock error modes, `_latency_seconds`, `_chunk_delay_seconds`, and `drop`
-  (closed connection) injection.
-- **0.2.0:** first packaged release: `fakerock` command, `MockBedrock` test double, pytest fixture,
-  control API, `--deterministic`, GHCR image.
+See [CHANGELOG.md](CHANGELOG.md) and the
+[GitHub releases](https://github.com/prabhuashwin/fakerock/releases). Version tags (`v*`) build the Docker
+image, the PyPI package and a GitHub release.
+
+## Contributing
+
+Issues and pull requests are welcome. The most useful reports are places where fakerock's behaviour differs
+from real Bedrock (status codes, error shapes, stream events), and corrections to the comparison table above.
+Run `python -m pytest tests examples -q` before opening a pull request.
 
 ## License
 

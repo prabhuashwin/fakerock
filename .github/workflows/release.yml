@@ -1,0 +1,75 @@
+name: release
+
+# On a version tag (v0.5.0): check the tag matches the package version, build sdist + wheel,
+# publish to PyPI, and create a GitHub release with the matching CHANGELOG section.
+#
+# One-time setup for PyPI (no API token needed): on pypi.org, Your account -> Publishing ->
+# add a "pending publisher" with owner prabhuashwin, repository fakerock, workflow release.yml,
+# environment pypi. Then create an environment named "pypi" in this repo's Settings -> Environments.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Tag must match package version
+        run: |
+          ver=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' mock_bedrock/__init__.py)
+          echo "tag=${GITHUB_REF_NAME#v} package=$ver"
+          test -n "$ver" && test "${GITHUB_REF_NAME#v}" = "$ver"
+      - run: pip install build
+      - run: python -m build
+      - name: Install the wheel and smoke test
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/venv/bin/fakerock" --version | grep -x "mock_bedrock ${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from CHANGELOG
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          awk -v v="$v" '$0 == "## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: dist/*

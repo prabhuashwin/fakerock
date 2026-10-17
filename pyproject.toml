@@ -12,16 +12,29 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
     "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Testing :: Mocking",
     "Framework :: Pytest",
 ]
+keywords = ["aws", "bedrock", "mock", "testing", "boto3", "llm"]
 
 [project.optional-dependencies]
 test = ["boto3>=1.34", "pytest"]
 
 [project.urls]
 Homepage = "https://github.com/prabhuashwin/fakerock"
+Repository = "https://github.com/prabhuashwin/fakerock"
+Issues = "https://github.com/prabhuashwin/fakerock/issues"
+Changelog = "https://github.com/prabhuashwin/fakerock/blob/main/CHANGELOG.md"
 
 [project.scripts]
 fakerock = "mock_bedrock.server:main"
