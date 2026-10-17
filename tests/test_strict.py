@@ -299,3 +299,60 @@ def test_strict_off_accepts_invalid_bodies():
     with MockBedrock() as m:
         assert post(m, "converse", {"messages": [A]})[0] == 200
         assert post(m, "invoke", invoke_body(messages=[IA]))[0] == 200
+
+
+def _cmsg(*blocks_by_role):
+    return {"messages": [{"role": r, "content": b} for r, b in blocks_by_role]}
+
+
+MALFORMED_CONVERSE = {
+    "text_int": _cmsg(("user", [{"text": 123}])),
+    "use_id_list": _cmsg(("user", [{"text": "hi"}]),
+                         ("assistant", [{"toolUse": {"toolUseId": ["a"], "name": "get_x", "input": {}}}]),
+                         ("user", [{"toolResult": {"toolUseId": "a", "content": [{"text": "r"}]}}])),
+    "result_id_list": _cmsg(("user", [{"text": "hi"}]),
+                            ("assistant", [{"toolUse": {"toolUseId": "a", "name": "get_x", "input": {}}}]),
+                            ("user", [{"toolResult": {"toolUseId": ["a"], "content": [{"text": "r"}]}}])),
+    "tools_int": {"messages": [{"role": "user", "content": [{"text": "hi"}]}], "toolConfig": {"tools": 5}},
+    "toolconfig_not_object": {"messages": [{"role": "user", "content": [{"text": "hi"}]}], "toolConfig": 5},
+    "result_text_int": _cmsg(("user", [{"text": "hi"}]),
+                             ("assistant", [{"toolUse": {"toolUseId": "a", "name": "get_x", "input": {}}}]),
+                             ("user", [{"toolResult": {"toolUseId": "a", "content": [{"text": 123}]}}])),
+}
+MALFORMED_INVOKE = {
+    "text_int": invoke_body(messages=[{"role": "user", "content": [{"type": "text", "text": 123}]}]),
+    "use_id_list": invoke_body(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": ["a"], "name": "get_x", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "r"}]}]),
+    "result_id_list": invoke_body(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "get_x", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": ["a"], "content": "r"}]}]),
+    "content_int": invoke_body(messages=[{"role": "user", "content": 123}]),
+    "tools_list_of_int": invoke_body(tools=[1]),
+    "tools_int": invoke_body(tools=5),
+}
+MALFORMED_CASES = (
+    [(p, k, b) for p in ("converse", "converse-stream") for k, b in MALFORMED_CONVERSE.items()]
+    + [(p, k, b) for p in ("invoke", "invoke-with-response-stream") for k, b in MALFORMED_INVOKE.items()])
+
+
+def _check_malformed_400(m, path, body):
+    before = len(m.requests())
+    status, etype, data = post(m, path, body)
+    assert status == 400, data
+    assert etype == "ValidationException"
+    rows = m.requests()
+    assert len(rows) == before + 1 and rows[-1]["status"] == 400
+
+
+@pytest.mark.parametrize("path,kind,body", MALFORMED_CASES)
+def test_malformed_nested_values_400_strict(mock, path, kind, body):
+    _check_malformed_400(mock, path, body)
+
+
+@pytest.mark.parametrize("path,kind,body", MALFORMED_CASES)
+def test_malformed_nested_values_400_non_strict(path, kind, body):
+    with MockBedrock() as m:
+        _check_malformed_400(m, path, body)

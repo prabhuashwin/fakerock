@@ -14,7 +14,15 @@ def split_chunks(text: str, size: int = 20) -> list:
 def _blocks(content):
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
+    if content is not None and not isinstance(content, list):
+        raise ValueError("content must be a string or a list of blocks")
     return [b for b in (content or []) if isinstance(b, dict)]
+
+
+def _opt_str(value, path):
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    return value
 
 
 def _int_field(value, name, default):
@@ -34,22 +42,39 @@ def parse_invoke(model: str, body: dict, stream: bool = False) -> Call:
     max_tokens = _int_field(body.get("max_tokens"), "max_tokens", 1024)
     system = body.get("system", "")
     if isinstance(system, list):
-        system = "\n".join(b.get("text", "") for b in system if isinstance(b, dict))
+        parts = []
+        for k, b in enumerate(system):
+            if isinstance(b, dict):
+                t = b.get("text", "")
+                if not isinstance(t, str):
+                    raise ValueError(f"system.{k}.text must be a string")
+                parts.append(t)
+        system = "\n".join(parts)
+    elif not isinstance(system, str):
+        raise ValueError("system must be a string or a list")
     messages = []
-    for m in body["messages"]:
+    for i, m in enumerate(body["messages"]):
         texts, results, uses = [], [], []
-        for b in _blocks(m.get("content")):
+        for j, b in enumerate(_blocks(m.get("content"))):
             t = b.get("type")
+            where = f"messages.{i}.content.{j}"
             if t == "text":
+                if not isinstance(b.get("text", ""), str):
+                    raise ValueError(f"{where}.text must be a string")
                 texts.append(b.get("text", ""))
             elif t == "tool_use":
+                _opt_str(b.get("id"), f"{where}.id")
                 uses.append({"id": b.get("id"), "name": b.get("name"), "input": b.get("input", {})})
             elif t == "tool_result":
+                _opt_str(b.get("tool_use_id"), f"{where}.tool_use_id")
                 results.append(b)
         messages.append({"role": m.get("role", "user"), "text": "\n".join(texts),
                          "tool_results": results, "tool_uses": uses})
+    raw_tools = body.get("tools") or []
+    if not isinstance(raw_tools, list) or not all(isinstance(t, dict) for t in raw_tools):
+        raise ValueError("tools must be a list of objects")
     tools = [{"name": t.get("name"), "description": t.get("description", ""),
-              "input_schema": t.get("input_schema") or {}} for t in body.get("tools", []) or []]
+              "input_schema": t.get("input_schema") or {}} for t in raw_tools]
     return Call(api="invoke", model=model, system=system or "", messages=messages, tools=tools,
                 max_tokens=max_tokens, stream=stream, raw=body)
 

@@ -19,7 +19,9 @@ import argparse
 import json
 import os
 import re
+import selectors
 import socket
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,6 +63,17 @@ def reply_to_result(reply: Reply, ok_builder):
     return result
 
 
+class ServerStopping(BaseException):
+    """Raised inside a handler when the server is being stopped (BaseException so the handlers'
+    `except Exception` fallbacks do not turn it into a 500 reply)."""
+
+
+def _wait(app, seconds):
+    """Sleep that stop() can interrupt."""
+    if app.stop_event.wait(seconds):
+        raise ServerStopping()
+
+
 def _error_mode(mode):
     return STREAM_ERROR_MODES[mode][1] if mode in STREAM_ERROR_MODES else mode
 
@@ -77,7 +90,7 @@ def compute_reply(app, call, family, mode):
         return Reply(status=status, error_type=et, message=msg)
     if mode in ("stall", "truncate"):
         if mode == "stall":
-            time.sleep(app.control.stall_seconds())
+            _wait(app, app.control.stall_seconds())
         r = app.pack.reply(call, family, "answer", app.control.ctx)
         if mode == "truncate":
             r.text = r.text[: len(r.text) // 2]
@@ -89,7 +102,7 @@ def compute_reply(app, call, family, mode):
 def _latency(app):
     delay = app.control.latency_seconds()
     if delay > 0:
-        time.sleep(delay)
+        _wait(app, delay)
 
 
 def resolve(app, call, family, streaming):
@@ -148,7 +161,7 @@ def resolve_embedding(app, call):
         status, et, msg = ERROR_MODES[mode]
         return label, Reply(status=status, error_type=et, message=msg), sid
     if mode == "stall":
-        time.sleep(app.control.stall_seconds())
+        _wait(app, app.control.stall_seconds())
     return label, None, sid
 
 
@@ -261,15 +274,36 @@ ROUTES = {
 class Handler(BaseHTTPRequestHandler):
     app = None
     protocol_version = "HTTP/1.1"
+    rbufsize = 0  # unbuffered reads: the selector below sees every pipelined request still on the socket
 
     def log_message(self, *a):
         pass
 
     def handle(self):
         try:
-            super().handle()
+            self.close_connection = True
+            # Wait for the next request without blocking in recv, so stop() can wake us
+            # (shutdown() from another thread does not interrupt a blocked recv on Windows).
+            # rbufsize = 0 means nothing is buffered beyond the socket, so readiness here is accurate even
+            # for pipelined requests; a selector (not select.select) avoids the fd >= 1024 limit.
+            with selectors.DefaultSelector() as sel:
+                sel.register(self.connection, selectors.EVENT_READ)
+                while True:
+                    while not sel.select(0.2):
+                        if self.app.stop_event.is_set():
+                            self.close_connection = True
+                            return
+                    self.handle_one_request()
+                    if self.close_connection:
+                        break
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass  # client dropped a kept-alive connection
+        except ServerStopping:
+            self.close_connection = True
+        except (OSError, ValueError):
+            # ValueError: selector on a socket already closed by close_connections() (fd -1)
+            if not self.app.stop_event.is_set():
+                raise
 
     def _hang_up(self):
         self.close_connection = True
@@ -294,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
             delay = self.app.control.chunk_delay_seconds()
             for i, ev in enumerate(result.events):
                 if i and delay > 0:
-                    time.sleep(delay)
+                    _wait(self.app, delay)
                 self.wfile.write(b"%x\r\n" % len(ev) + ev + b"\r\n")
                 self.wfile.flush()
                 if result.drop:  # first event sent; hang up without the terminating chunk
@@ -322,10 +356,20 @@ class Handler(BaseHTTPRequestHandler):
                     while self.rfile.readline(65537).strip():  # trailers
                         pass
                     return bytes(out)
-                out += self.rfile.read(size)
+                out += self._read_exact(size)
                 self.rfile.readline(65537)
         length = int(self.headers.get("content-length", 0) or 0)
-        return self.rfile.read(length) if length > 0 else b""
+        return self._read_exact(length) if length > 0 else b""
+
+    def _read_exact(self, n) -> bytes:
+        """rfile is unbuffered (rbufsize = 0), so one read() can return a partial body; loop until n bytes."""
+        out = bytearray()
+        while len(out) < n:
+            chunk = self.rfile.read(n - len(out))
+            if not chunk:
+                raise ConnectionResetError("client closed the connection mid-body")
+            out += chunk
+        return bytes(out)
 
     def _control(self, method, path, body):
         """Handle /_fakerock/* routes; these are never written to the request log."""
@@ -406,6 +450,67 @@ class App:
     def __init__(self, pack, control, embed_dims, ids=None, strict=False):
         self.pack, self.control, self.embed_dims, self.ids = pack, control, embed_dims, ids or IdSource()
         self.strict = strict
+        self.stop_event = threading.Event()  # set by the server's close_connections(); wakes sleeping handlers
+
+
+class FakerockServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that tracks accepted connections and their worker threads, so that
+    close_connections() can end keep-alive connections and wait for in-flight handlers."""
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        self._conn_lock = threading.Lock()
+        self._conns = set()
+        self._workers = set()
+        self.stopping = False
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        with self._conn_lock:  # register before the worker starts; refuse once stopping
+            if self.stopping:
+                refuse = True
+            else:
+                refuse = False
+                self._conns.add(request)
+                t = threading.Thread(target=self.process_request_thread, args=(request, client_address),
+                                     daemon=True)
+                self._workers.add(t)
+                t.start()
+        if refuse:
+            self.shutdown_request(request)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._conn_lock:
+                self._workers.discard(threading.current_thread())
+
+    def shutdown_request(self, request):
+        with self._conn_lock:
+            self._conns.discard(request)
+        super().shutdown_request(request)
+
+    def close_connections(self, timeout=5):
+        """Stop serving existing connections: wake sleeping handlers, hang up every open socket and
+        wait (up to `timeout` s) for the handler threads to finish. Call after shutdown()."""
+        with self._conn_lock:
+            self.stopping = True
+            conns, workers = list(self._conns), list(self._workers)
+        self.app.stop_event.set()
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        deadline = time.monotonic() + timeout
+        for t in workers:
+            t.join(max(0.0, deadline - time.monotonic()))
+        for c in conns:  # anything a stuck handler still holds
+            try:
+                c.close()
+            except OSError:
+                pass
 
 
 def make_server(host="127.0.0.1", port=52999, pack="generic", pack_options=None, log_dir=None,
@@ -416,10 +521,10 @@ def make_server(host="127.0.0.1", port=52999, pack="generic", pack_options=None,
     pack_obj = load_pack(pack, pack_options or {}) if isinstance(pack, str) else pack
     ids = IdSource(deterministic)
     control._reset_hooks.append(ids.reset)
+    control.ctx.ids = ids
     app = App(pack_obj, control, embed_dims, ids, strict)
     handler = type("BoundHandler", (Handler,), {"app": app})
-    server = ThreadingHTTPServer((host, port), handler)
-    server.daemon_threads = True
+    server = FakerockServer((host, port), handler)
     server.app = app
     return server
 

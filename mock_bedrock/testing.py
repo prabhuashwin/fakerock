@@ -105,7 +105,8 @@ class MockBedrock:
         if not self._server:
             return
         server, self._server = self._server, None
-        server.shutdown()
+        server.shutdown()  # leave the accept loop
+        server.close_connections()  # wake stalled handlers, hang up keep-alive sockets, join workers
         server.server_close()
         self._thread.join(5)
         self._cleanup()

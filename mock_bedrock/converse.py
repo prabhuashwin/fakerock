@@ -9,12 +9,20 @@ def split_chunks(text: str, size: int = 20) -> list:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
 
 
+def _opt_str(value, path):
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    return value
+
+
 def _result_content(items):
     out = []
     for it in items or []:
         if not isinstance(it, dict):
             continue
         if "text" in it:
+            if not isinstance(it["text"], str):
+                raise ValueError("toolResult content text must be a string")
             out.append({"type": "text", "text": it["text"]})
         elif "json" in it:
             out.append({"type": "text", "text": json.dumps(it["json"])})
@@ -35,28 +43,50 @@ def parse_converse(model: str, body: dict, stream: bool = False) -> Call:
     max_tokens = cfg.get("maxTokens", 1024)
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
         raise ValueError("inferenceConfig.maxTokens must be an integer")
-    system = "\n".join(b.get("text", "") for b in body.get("system", []) or []
-                       if isinstance(b, dict) and "text" in b)
+    sys_blocks = body.get("system", []) or []
+    if not isinstance(sys_blocks, list):
+        raise ValueError("system must be a list")
+    system_texts = []
+    for k, b in enumerate(sys_blocks):
+        if isinstance(b, dict) and "text" in b:
+            if not isinstance(b["text"], str):
+                raise ValueError(f"system.{k}.text must be a string")
+            system_texts.append(b["text"])
+    system = "\n".join(system_texts)
     messages = []
-    for m in body["messages"]:
+    for i, m in enumerate(body["messages"]):
         texts, results, uses = [], [], []
-        for b in m.get("content", []) or []:
+        content = m.get("content", []) or []
+        if not isinstance(content, list):
+            raise ValueError(f"messages.{i}.content must be a list")
+        for j, b in enumerate(content):
             if not isinstance(b, dict):
                 continue
+            where = f"messages.{i}.content.{j}"
             if "text" in b:
+                if not isinstance(b["text"], str):
+                    raise ValueError(f"{where}.text must be a string")
                 texts.append(b["text"])
             elif isinstance(b.get("toolUse"), dict):
                 tu = b["toolUse"]
+                _opt_str(tu.get("toolUseId"), f"{where}.toolUse.toolUseId")
                 uses.append({"id": tu.get("toolUseId"), "name": tu.get("name"), "input": tu.get("input", {})})
             elif isinstance(b.get("toolResult"), dict):
                 tr = b["toolResult"]
+                _opt_str(tr.get("toolUseId"), f"{where}.toolResult.toolUseId")
                 results.append({"type": "tool_result", "tool_use_id": tr.get("toolUseId"),
                                 "content": _result_content(tr.get("content")),
                                 "is_error": tr.get("status") == "error"})
         messages.append({"role": m.get("role", "user"), "text": "\n".join(texts),
                          "tool_results": results, "tool_uses": uses})
     tools = []
-    for t in (body.get("toolConfig") or {}).get("tools", []) or []:
+    tool_config = body.get("toolConfig") or {}
+    if not isinstance(tool_config, dict):
+        raise ValueError("toolConfig must be an object")
+    raw_tools = tool_config.get("tools") or []
+    if not isinstance(raw_tools, list):
+        raise ValueError("toolConfig.tools must be a list")
+    for t in raw_tools:
         spec = t.get("toolSpec") if isinstance(t, dict) else None
         if not isinstance(spec, dict):
             continue

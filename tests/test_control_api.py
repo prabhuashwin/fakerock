@@ -35,6 +35,24 @@ class ControlApiTests(unittest.TestCase):
         self.assertIn("bad-one", b["message"])
         self.assertEqual(self.converse()[0], 200)  # startup scenario still active
 
+    def test_non_string_reply_fields_rejected_and_old_scenarios_kept(self):
+        bad_replies = [
+            {"reply": {"text": None}},
+            {"replies": [{"text": 5}]},
+            {"reply": {"message": None}},
+            {"reply": {"stop_reason": 1}},
+            {"reply": {"error_type": 3}},
+            {"reply": {"tool_use": {"name": "x", "id": ["a"]}}},
+            {"reply": {"tool_use": {"name": "x", "id": ""}}},
+        ]
+        for bad in bad_replies:
+            with self.subTest(bad=bad):
+                s, _, _ = self.h.request("/_fakerock/scenarios", {"scenarios": [bad]}, method="PUT")
+                self.assertEqual(s, 400)
+                s, _, b = self.converse()
+                self.assertEqual(s, 200)
+                self.assertIn("from-startup", json.dumps(b))
+
     def test_bad_json_400(self):
         req = urllib.request.Request(self.h.base + "/_fakerock/scenarios", data=b"{nope", method="POST")
         with self.assertRaises(urllib.error.HTTPError) as cm:

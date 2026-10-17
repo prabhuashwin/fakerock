@@ -60,10 +60,15 @@ def _validate_reply(r, label):
     mode = r.get("mode")
     if mode is not None and mode not in COMMON_MODES:
         raise ScenarioError(f"{label}.mode must be one of {', '.join(COMMON_MODES)}")
+    for k in ("text", "message", "error_type", "stop_reason"):
+        if k in r and not isinstance(r[k], str):
+            raise ScenarioError(f"{label}.{k} must be a string")
     tu = r.get("tool_use")
     if tu is not None:
         if not isinstance(tu, dict) or not isinstance(tu.get("name"), str) or not tu["name"]:
             raise ScenarioError(f"{label}.tool_use must be an object with a non-empty 'name'")
+        if "id" in tu and (not isinstance(tu["id"], str) or not tu["id"]):
+            raise ScenarioError(f"{label}.tool_use.id must be a non-empty string")
         if not isinstance(tu.get("input", {}), dict):
             raise ScenarioError(f"{label}.tool_use.input must be an object")
     st = r.get("status", 200)
@@ -118,6 +123,7 @@ class Ctx:
         self.log_dir = Path(log_dir)
         self._lock = lock
         self._warned = False
+        self.ids = None  # IdSource, set by make_server
 
     def log(self, name, row):
         if not name.endswith(".jsonl"):

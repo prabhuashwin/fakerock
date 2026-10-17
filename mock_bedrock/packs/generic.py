@@ -46,8 +46,10 @@ class GenericPack(Pack):
         last = call.messages[-1] if call.messages else {}
         if call.tools and not last.get("tool_results"):
             tool = call.tools[0]
+            ids = getattr(ctx, "ids", None)
+            tid = ids.tool_use_id() if ids is not None else f"tooluse_mock_{next(self._counter)}"
             return Reply(
-                tool_use={"id": f"tooluse_mock_{next(self._counter)}", "name": tool["name"],
+                tool_use={"id": tid, "name": tool["name"],
                           "input": build_input(tool.get("input_schema"))},
                 stop_reason="tool_use")
         return Reply(text="Mock reply to: " + call.last_user_text[:200])

@@ -175,6 +175,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(rows[1]["texts"], 2)
         self.assertNotIn("prompt", rows[1])
 
+    def test_malformed_nested_values_logged_400(self):
+        conv_text = {"messages": [{"role": "user", "content": [{"text": 123}]}]}
+        conv_id = {"messages": [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"toolUse": {"toolUseId": ["a"], "name": "t", "input": {}}}]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": ["a"], "content": [{"text": "r"}]}}]}]}
+        iv = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 50}
+        inv_text = {**iv, "messages": [{"role": "user", "content": [{"type": "text", "text": 123}]}]}
+        inv_use = {**iv, "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": ["a"], "name": "t", "input": {}}]}]}
+        inv_res = {**iv, "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "t", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": ["a"], "content": "r"}]}]}
+        cases = [(p, b) for p in ("converse", "converse-stream") for b in (conv_text, conv_id)]
+        cases += [(p, b) for p in ("invoke", "invoke-with-response-stream") for b in (inv_text, inv_use, inv_res)]
+        for strict in (False, True):
+            h = Harness(strict=strict)
+            self.addCleanup(h.stop)
+            for n, (path, body) in enumerate(cases, 1):
+                with self.subTest(strict=strict, path=path, n=n):
+                    s, _, b = h.request(f"/model/{MODEL}/{path}", body)
+                    self.assertEqual(s, 400, b)
+                    self.assertEqual(len(h.requests_log()), n)
+                    self.assertEqual(h.requests_log()[-1]["status"], 400)
+
     def test_arn_model_id(self):
         arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-3-haiku"
         s, _, b = self.h.request(f"/model/{quote(arn, safe='')}/invoke", claude("hi"))

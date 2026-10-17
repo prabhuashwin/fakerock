@@ -7,7 +7,7 @@ class IdSource:
     def __init__(self, deterministic=False):
         self.deterministic = deterministic
         self._lock = threading.Lock()
-        self._n = {"req": 0, "msg": 0, "embed": 0}
+        self._n = {"req": 0, "msg": 0, "embed": 0, "tool": 0}
 
     def reset(self):
         with self._lock:
@@ -28,6 +28,10 @@ class IdSource:
 
     def msg_id(self):
         return f"msg_mock_{self._next('msg'):016d}" if self.deterministic else "msg_mock_" + uuid.uuid4().hex[:16]
+
+    def tool_use_id(self):
+        """Sequential in both modes (matches the generic pack's historical behaviour)."""
+        return f"tooluse_mock_{self._next('tool')}"
 
     def embed_id(self):
         return f"00000000-0000-4000-8000-{self._next('embed'):012d}" if self.deterministic else str(uuid.uuid4())

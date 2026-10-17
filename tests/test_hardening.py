@@ -308,6 +308,63 @@ class PackLoading(unittest.TestCase):
                      "PACK = P\n", encoding="utf-8")
         self.assertEqual(load_pack(str(f)).name, "mine")
 
+    def _write(self, name, body):
+        d = Path(tempfile.mkdtemp(prefix="mb_pack_"))
+        self.addCleanup(shutil.rmtree, d, True)
+        f = d / name
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_pack_with_dataclass_and_future_annotations(self):
+        import sys
+        f = self._write("dc.py", """
+from __future__ import annotations
+from dataclasses import dataclass
+from mock_bedrock.packs.base import Pack, Reply
+
+@dataclass
+class Cfg:
+    word: str
+    n: int = 2
+
+class P(Pack):
+    name = 'dc'
+    def reply(self, call, family, mode, ctx):
+        c = Cfg('hi')
+        return Reply(text=c.word * c.n)
+PACK = P
+""")
+        pack = load_pack(str(f))
+        self.assertEqual(pack.reply(None, "chat", "answer", None).text, "hihi")
+        self.assertIn(type(pack).__module__, sys.modules)
+
+    def test_two_packs_do_not_clobber(self):
+        import sys
+        body = """
+from mock_bedrock.packs.base import Pack, Reply
+class P(Pack):
+    name = '%s'
+    def reply(self, call, family, mode, ctx):
+        return Reply(text='%s')
+PACK = P
+"""
+        a = load_pack(str(self._write("a.py", body % ("a", "reply-a"))))
+        b = load_pack(str(self._write("b.py", body % ("b", "reply-b"))))
+        self.assertNotEqual(type(a).__module__, type(b).__module__)
+        self.assertIn(type(a).__module__, sys.modules)
+        self.assertIn(type(b).__module__, sys.modules)
+        self.assertEqual(a.reply(None, "chat", "answer", None).text, "reply-a")
+        self.assertEqual(b.reply(None, "chat", "answer", None).text, "reply-b")
+
+    def test_failing_pack_leaves_no_sys_modules_entry(self):
+        import sys
+        f = self._write("bad.py", "raise ValueError('boom')")
+        before = set(sys.modules)
+        with self.assertRaises(ValueError):
+            load_pack(str(f))
+        stale = [m for m in set(sys.modules) - before if m.startswith("mock_bedrock_user_pack")]
+        self.assertEqual(stale, [])
+
 
 if __name__ == "__main__":
     unittest.main()

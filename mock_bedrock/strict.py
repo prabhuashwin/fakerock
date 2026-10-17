@@ -51,6 +51,29 @@ def _results(m, conv):
     return out
 
 
+def _malformed(c, i, conv):
+    """Explicit rejection of non-string text / tool ids (checked before any id matching or hashing)."""
+    for j, b in enumerate(c if isinstance(c, list) else []):
+        if not isinstance(b, dict):
+            continue
+        where = f"messages.{i}.content.{j}"
+        if "text" in b and (conv or b.get("type") == "text") and not isinstance(b["text"], str):
+            return f"{where}.text must be a string"
+        if conv:
+            for key in ("toolUse", "toolResult"):
+                if isinstance(b.get(key), dict) and "toolUseId" in b[key] and not isinstance(b[key]["toolUseId"], str):
+                    return f"{where}.{key}.toolUseId must be a string"
+            for k, r in enumerate(b["toolResult"].get("content") or [] if isinstance(b.get("toolResult"), dict)
+                                  and isinstance(b["toolResult"].get("content"), list) else []):
+                if isinstance(r, dict) and "text" in r and not isinstance(r["text"], str):
+                    return f"{where}.toolResult.content.{k}.text must be a string"
+        else:
+            key = {"tool_use": "id", "tool_result": "tool_use_id"}.get(b.get("type"))
+            if key and key in b and not isinstance(b[key], str):
+                return f"{where}.{key} must be a string"
+    return None
+
+
 def _messages(msgs, conv):
     """Structure checks shared by converse and invoke messages; returns (error, saw_tool_blocks)."""
     first = ("A conversation must start with a user message. Try again with a conversation that starts with a "
@@ -73,6 +96,9 @@ def _messages(msgs, conv):
                     f'messages: roles must alternate between "user" and "assistant", but found multiple "{role}" '
                     "roles in a row"), tools
         c = m.get("content")
+        bad = _malformed(c, i, conv)
+        if bad:
+            return bad, tools
         if isinstance(c, str) and not conv:
             if not c.strip():
                 return "messages: text content blocks must be non-empty", tools

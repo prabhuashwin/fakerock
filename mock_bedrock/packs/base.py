@@ -1,6 +1,8 @@
 """Pack contract: Call, Reply, Pack and load_pack."""
+import hashlib
 import importlib
 import importlib.util
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -78,9 +80,21 @@ def load_pack(spec: str, options: Optional[dict] = None) -> Pack:
     if spec.endswith(".py"):
         if not path.is_file():
             raise RuntimeError(f"pack file not found: {spec}")
-        mspec = importlib.util.spec_from_file_location("mock_bedrock_user_pack", str(path))
+        resolved = str(path.resolve())
+        modname = "mock_bedrock_user_pack_" + hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:10]
+        mspec = importlib.util.spec_from_file_location(modname, resolved)
         mod = importlib.util.module_from_spec(mspec)
-        mspec.loader.exec_module(mod)
+        _missing = object()
+        previous = sys.modules.get(modname, _missing)
+        sys.modules[modname] = mod  # needed by dataclasses & friends (cls.__module__ lookup)
+        try:
+            mspec.loader.exec_module(mod)
+        except BaseException:
+            if previous is _missing:
+                sys.modules.pop(modname, None)
+            else:
+                sys.modules[modname] = previous
+            raise
         if not hasattr(mod, "PACK"):
             raise RuntimeError(f"pack file {spec} does not define PACK")
         return mod.PACK(options)

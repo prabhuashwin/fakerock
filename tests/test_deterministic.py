@@ -57,6 +57,27 @@ class TestDeterministic(unittest.TestCase):
         finally:
             h.stop()
 
+    def test_reset_restarts_tool_use_ids(self):
+        conv = {"messages": [{"role": "user", "content": [{"text": "hi"}]}],
+                "toolConfig": {"tools": [{"toolSpec": {"name": "t", "inputSchema": {"json": {"type": "object"}}}}]}}
+        inv = dict(INV, tools=[{"name": "t", "input_schema": {"type": "object"}}])
+        h = Harness(deterministic=True)
+        try:
+            def conv_id():
+                return h.request("/model/anthropic.x/converse", conv)[2]["output"]["message"]["content"][0]["toolUse"]["toolUseId"]
+
+            def inv_id():
+                return [b for b in h.request("/model/anthropic.x/invoke", inv)[2]["content"] if b["type"] == "tool_use"][0]["id"]
+            self.assertEqual(conv_id(), "tooluse_mock_1")
+            self.assertEqual(conv_id(), "tooluse_mock_2")
+            self.assertEqual(h.request("/_fakerock/reset", {})[0], 200)
+            self.assertEqual(conv_id(), "tooluse_mock_1")
+            self.assertEqual(inv_id(), "tooluse_mock_2")
+            h.request("/_fakerock/reset", {})
+            self.assertEqual(inv_id(), "tooluse_mock_1")
+        finally:
+            h.stop()
+
     def test_default_is_random(self):
         h = Harness()
         try:
